@@ -56,6 +56,16 @@ std::string format_time_precise(double seconds) {
   return buffer;
 }
 
+// Explains the item just drawn, including when it's disabled.
+void tip(const char* text) {
+  if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) return;
+  ImGui::BeginTooltip();
+  ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.0f);
+  ImGui::TextUnformatted(text);
+  ImGui::PopTextWrapPos();
+  ImGui::EndTooltip();
+}
+
 std::string format_number(float value, const char* unit) {
   char buffer[32];
   snprintf(buffer, sizeof(buffer), "%.2f%s", value, unit);
@@ -793,6 +803,135 @@ void draw_waveform(const EditTrack& t, const ImVec2& p, const ImVec2& size, doub
   }
 }
 
+// Widest gap between what strong matches measured and the fitted line, in ms.
+double match_spread_ms(const SyncResult& sync) {
+  constexpr double kStrong = 15.0;
+  double low = 0.0, high = 0.0;
+  bool any = false;
+  for (const SyncAnchor& a : sync.anchors) {
+    if (a.strength < kStrong) continue;
+    const double r = a.lag_seconds - (sync.map.offset_seconds + sync.map.drift * a.ref_seconds);
+    low = any ? std::min(low, r) : r;
+    high = any ? std::max(high, r) : r;
+    any = true;
+  }
+  return (high - low) * 1000.0;
+}
+
+ImVec4 confidence_color(double confidence) { return confidence >= 0.7 ? kGreen : (confidence >= 0.4 ? kAmber : kRed); }
+
+void draw_alignment_report(App& app) {
+  ImGui::Spacing();
+  ImGui::SeparatorText("Alignment");
+
+  bool any = false;
+  for (const auto& e : app.edit.tracks) any = any || e.sync != nullptr;
+  if (!any) {
+    ImGui::TextColored(kMuted, "Press Align tracks to measure how the microphones line up.");
+    return;
+  }
+  ImGui::TextWrapped(
+      "Your original WAV files are not changed. Aligning only saves the numbers below to %s in the session folder. "
+      "New WAV files are written only when you export, into the \"aligned\" folder.",
+      kEditsFileName);
+  ImGui::Spacing();
+
+  static const char* const kHeaders[] = {"Track", "Confidence", "Offset", "Drift", "Drift over recording", "Matches", "Spread", "Timestamps said"};
+  static const char* const kHeaderTips[] = {
+      "Each track is compared with the reference track.",
+      "How much to trust this result. Hover over a track's label for the explanation.",
+      "How far into this track the reference track's first moment falls. Positive means this microphone started first.",
+      "How much faster this microphone's clock runs than the reference, in parts per million.",
+      "How far the two tracks would slide apart by the end of this recording without correction.",
+      "Sharp sounds found in both tracks and used for the fit, out of all that were strong enough to consider.",
+      "How far apart the strongest matches landed. Zero to 1 ms is tight. Several ms suggests echoes, effects on the "
+      "microphone, or sounds made at different distances.",
+      "The estimate from Windows capture times alone, before listening to the audio. It doesn't know each device's "
+      "own latency.",
+  };
+  if (ImGui::BeginTable("alignment", 8, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerH)) {
+    ImGui::TableSetupColumn(kHeaders[0], ImGuiTableColumnFlags_WidthStretch, 3.0f);
+    for (int c = 1; c < 8; c++) ImGui::TableSetupColumn(kHeaders[c], ImGuiTableColumnFlags_WidthFixed);
+    ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+    for (int c = 0; c < 8; c++) {
+      ImGui::TableSetColumnIndex(c);
+      ImGui::TableHeader(kHeaders[c]);
+      tip(kHeaderTips[c]);
+    }
+    for (size_t i = 0; i < app.edit.tracks.size(); i++) {
+      const std::shared_ptr<const SyncResult>& s = app.edit.tracks[i].sync;
+      if (!s) continue;
+      const double seconds = app.session.tracks[i].wav->seconds();
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(app.session.tracks[i].name.c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextColored(confidence_color(s->confidence), "%s", confidence_label(s->confidence));
+      ImGui::TableNextColumn();
+      ImGui::Text("%.2f ms", s->map.offset_seconds * 1000.0);
+      ImGui::TableNextColumn();
+      ImGui::Text("%.2f ppm%s", s->map.drift * 1e6, s->drift_measured ? "" : " (estimate)");
+      ImGui::TableNextColumn();
+      ImGui::Text("%.2f ms", s->map.drift * seconds * 1000.0);
+      ImGui::TableNextColumn();
+      ImGui::Text("%d of %d", s->anchors_used, s->anchors_usable);
+      ImGui::TableNextColumn();
+      const double spread = match_spread_ms(*s);
+      ImGui::TextColored(spread > 2.0 ? kAmber : kMuted, "%.2f ms", spread);
+      ImGui::TableNextColumn();
+      if (s->has_timestamps) {
+        ImGui::Text("%.2f ms", s->timestamps.offset_seconds * 1000.0);
+      } else {
+        ImGui::TextColored(kMuted, "none");
+      }
+    }
+    ImGui::EndTable();
+  }
+
+  for (size_t i = 0; i < app.edit.tracks.size(); i++) {
+    const std::shared_ptr<const SyncResult>& s = app.edit.tracks[i].sync;
+    if (!s) continue;
+    ImGui::PushID(int(i));
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Text, confidence_color(s->confidence));
+    ImGui::TextWrapped("%s: %s", app.session.tracks[i].name.c_str(), s->message.c_str());
+    ImGui::PopStyleColor();
+    if (ImGui::TreeNode("Every sound that was compared")) {
+      std::vector<SyncAnchor> anchors = s->anchors;
+      std::sort(anchors.begin(), anchors.end(),
+                [](const SyncAnchor& a, const SyncAnchor& b) { return a.ref_seconds < b.ref_seconds; });
+      if (ImGui::BeginTable("matches", 5, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_BordersInnerH)) {
+        ImGui::TableSetupColumn("Time");
+        ImGui::TableSetupColumn("Measured offset");
+        ImGui::TableSetupColumn("Off the line by");
+        ImGui::TableSetupColumn("Strength");
+        ImGui::TableSetupColumn("Used");
+        ImGui::TableHeadersRow();
+        for (const SyncAnchor& a : anchors) {
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          ImGui::TextUnformatted(format_time_precise(a.ref_seconds).c_str());
+          ImGui::TableNextColumn();
+          ImGui::Text("%.3f ms", a.lag_seconds * 1000.0);
+          ImGui::TableNextColumn();
+          ImGui::Text("%+.3f ms", (a.lag_seconds - (s->map.offset_seconds + s->map.drift * a.ref_seconds)) * 1000.0);
+          ImGui::TableNextColumn();
+          ImGui::Text("%.0f", a.strength);
+          ImGui::TableNextColumn();
+          if (a.inlier) {
+            ImGui::TextColored(kGreen, "yes");
+          } else {
+            ImGui::TextColored(kMuted, "no");
+          }
+        }
+        ImGui::EndTable();
+      }
+      ImGui::TreePop();
+    }
+    ImGui::PopID();
+  }
+}
+
 void draw_edit_tab(App& app) {
   collect_sync_results(app);
   sync_playback(app);
@@ -1041,6 +1180,7 @@ void draw_edit_tab(App& app) {
     const ImVec2 canvas_size(canvas_width, lane_height);
     ImGui::SetCursorScreenPos(canvas_pos);
     ImGui::InvisibleButton("lane", canvas_size);
+    ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);  // Scrolling here zooms instead of scrolling the page.
     if (ImGui::IsItemActive() && !recording) {
       double when = app.view_start + (ImGui::GetIO().MousePos.x - canvas_pos.x) / canvas_width * app.view_seconds;
       app.playback.seek(std::max(app.timeline_start, std::min(when, app.timeline_end)));
@@ -1088,17 +1228,7 @@ void draw_edit_tab(App& app) {
 
   ImGui::TextColored(kMuted, "Click a waveform to move the playhead. Scroll over it to zoom. Green marks show the sounds used to align.");
 
-  bool warned = false;
-  for (size_t i = 1; i < app.tracks.size(); i++) {
-    const std::shared_ptr<const SyncResult>& sync = app.edit.tracks[i].sync;
-    if (sync && sync->confidence < 0.7) {
-      if (!warned) ImGui::Spacing();
-      warned = true;
-      ImGui::PushStyleColor(ImGuiCol_Text, sync->confidence < 0.4 ? kRed : kAmber);
-      ImGui::TextWrapped("%s: %s", app.session.tracks[i].name.c_str(), sync->message.c_str());
-      ImGui::PopStyleColor();
-    }
-  }
+  draw_alignment_report(app);
 }
 
 void apply_dialog_results(App& app) {
@@ -1219,7 +1349,8 @@ int main(int argc, char** argv) {
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
     ImGui::SetNextWindowSize(io.DisplaySize);
     ImGui::Begin("main", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus);
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus);
     if (ImGui::BeginTabBar("tabs")) {
       ImGuiTabItemFlags record_flags = app.tab_request == 1 ? ImGuiTabItemFlags_SetSelected : 0;
       ImGuiTabItemFlags edit_flags = app.tab_request == 2 ? ImGuiTabItemFlags_SetSelected : 0;
