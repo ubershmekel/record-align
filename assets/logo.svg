@@ -23,14 +23,14 @@
     C56,52 60,108 68,108
     C76,108 80,66 88,66
     C96,66 100,80 100,80"
-    fill="none" stroke="#00c9b1" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+    fill="none" stroke="#00c9b1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
   <!-- Right half: aligned (same baseline as track 2) -->
   <path d="M100,80
     C108,80 112,56 120,56
     C128,56 132,104 140,104
     C148,104 152,72 160,72
     C168,72 172,80 180,80"
-    fill="none" stroke="#00c9b1" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    fill="none" stroke="#00c9b1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- Track 2: amber waveform — starts offset downward left, aligns right -->
   <!-- Left half: offset downward by ~10px -->
@@ -39,24 +39,24 @@
     C56,92 60,148 68,148
     C76,148 80,106 88,106
     C96,106 100,120 100,120"
-    fill="none" stroke="#f59e0b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
+    fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity="0.55"/>
   <!-- Right half: aligned (right half matches track 1 in phase) -->
   <path d="M100,120
     C108,120 112,96 120,96
     C128,96 132,144 140,144
     C148,144 152,112 160,112
     C168,112 172,120 180,120"
-    fill="none" stroke="#f59e0b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- Alignment marker: vertical dashed line at x=100 -->
   <line x1="100" y1="24" x2="100" y2="176"
     stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.6"/>
 
   <!-- Alignment tick marks on the center line -->
-  <line x1="93" y1="80" x2="107" y2="80" stroke="#e2e8f0" stroke-width="2" opacity="0.9"/>
-  <line x1="93" y1="120" x2="107" y2="120" stroke="#e2e8f0" stroke-width="2" opacity="0.9"/>
+  <line x1="91" y1="80" x2="109" y2="80" stroke="#e2e8f0" stroke-width="2.5" opacity="0.9"/>
+  <line x1="91" y1="120" x2="109" y2="120" stroke="#e2e8f0" stroke-width="2.5" opacity="0.9"/>
 
   <!-- Small dots at alignment points -->
-  <circle cx="100" cy="80" r="3.5" fill="#e2e8f0"/>
-  <circle cx="100" cy="120" r="3.5" fill="#e2e8f0"/>
+  <circle cx="100" cy="80" r="4.5" fill="#e2e8f0"/>
+  <circle cx="100" cy="120" r="4.5" fill="#e2e8f0"/>
 </svg>
