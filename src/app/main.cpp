@@ -56,6 +56,12 @@ std::string format_time_precise(double seconds) {
   return buffer;
 }
 
+std::string format_number(float value, const char* unit) {
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "%.2f%s", value, unit);
+  return buffer;
+}
+
 // Min/max summaries for drawing long files quickly.
 struct TrackPeaks {
   std::vector<float> minimum;
@@ -801,16 +807,29 @@ void draw_edit_tab(App& app) {
     app.edit.in_set = true;
     app.edit.in_point = std::min(app.playback.position(), effective_out(app));
   }
+  if (ImGui::BeginPopupContextItem("in_menu")) {
+    if (ImGui::MenuItem("Clear in point", nullptr, false, app.edit.in_set)) app.edit.in_set = false;
+    ImGui::EndPopup();
+  }
   ImGui::SameLine();
   if (ImGui::Button("Set out")) {
     app.edit.out_set = true;
     app.edit.out_point = std::max(app.playback.position(), effective_in(app));
+  }
+  if (ImGui::BeginPopupContextItem("out_menu")) {
+    if (ImGui::MenuItem("Clear out point", nullptr, false, app.edit.out_set)) app.edit.out_set = false;
+    ImGui::EndPopup();
   }
   ImGui::SameLine();
   ImGui::AlignTextToFramePadding();
   if (app.edit.in_set || app.edit.out_set) {
     ImGui::TextColored(kAmber, "Trim %s to %s", format_time_precise(effective_in(app)).c_str(),
                        format_time_precise(effective_out(app)).c_str());
+    ImGui::SameLine();
+    if (ImGui::Button("Clear trim")) {
+      app.edit.in_set = false;
+      app.edit.out_set = false;
+    }
   } else {
     ImGui::TextColored(kMuted, "No trim");
   }
@@ -902,6 +921,16 @@ void draw_edit_tab(App& app) {
                       ImGuiWindowFlags_NoScrollbar);
     ImGui::TextUnformatted(st.name.c_str());
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", st.wav_path.u8string().c_str());
+    if (ImGui::BeginPopupContextItem("track_menu")) {
+      if (ImGui::MenuItem("Reset this track")) {
+        e.gain_db = 0.0f;
+        e.mute = false;
+        e.offset_ms = e.sync ? float(e.sync->map.offset_seconds * 1000.0) : 0.0f;
+        e.drift_ppm = e.sync ? float(e.sync->map.drift * 1e6) : 0.0f;
+        t.playback.solo.store(false);
+      }
+      ImGui::EndPopup();
+    }
     bool solo = t.playback.solo.load();
     ImGui::PushStyleColor(ImGuiCol_Button, e.mute ? ImVec4(0.72f, 0.42f, 0.14f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
     if (ImGui::SmallButton("Mute")) e.mute = !e.mute;
@@ -913,14 +942,38 @@ void draw_edit_tab(App& app) {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::SliderFloat("##gain", &e.gain_db, -40.0f, 40.0f, "%.1f dB");
+    if (ImGui::BeginPopupContextItem("gain_menu")) {
+      if (ImGui::MenuItem("Reset gain to 0 dB")) e.gain_db = 0.0f;
+      ImGui::EndPopup();
+    }
     if (i == 0) {
       ImGui::TextColored(kMuted, "Reference track");
     } else {
       ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
       ImGui::DragFloat("ms##offset", &e.offset_ms, 0.1f, 0.0f, 0.0f, "%.2f");
+      if (ImGui::BeginPopupContextItem("offset_menu")) {
+        if (e.sync) {
+          const float aligned_ms = float(e.sync->map.offset_seconds * 1000.0);
+          if (ImGui::MenuItem(("Reset to alignment result (" + format_number(aligned_ms, " ms") + ")").c_str())) {
+            e.offset_ms = aligned_ms;
+          }
+        }
+        if (ImGui::MenuItem("Reset to 0 ms")) e.offset_ms = 0.0f;
+        ImGui::EndPopup();
+      }
       ImGui::SameLine();
       ImGui::SetNextItemWidth(-40.0f * scale);
       ImGui::DragFloat("ppm##drift", &e.drift_ppm, 0.1f, -500.0f, 500.0f, "%.2f");
+      if (ImGui::BeginPopupContextItem("drift_menu")) {
+        if (e.sync) {
+          const float aligned_ppm = float(e.sync->map.drift * 1e6);
+          if (ImGui::MenuItem(("Reset to alignment result (" + format_number(aligned_ppm, " ppm") + ")").c_str())) {
+            e.drift_ppm = aligned_ppm;
+          }
+        }
+        if (ImGui::MenuItem("Reset to 0 ppm")) e.drift_ppm = 0.0f;
+        ImGui::EndPopup();
+      }
       if (e.sync) {
         ImVec4 color = e.sync->confidence >= 0.7 ? kGreen : (e.sync->confidence >= 0.4 ? kAmber : kRed);
         ImGui::TextColored(color, "%s confidence", confidence_label(e.sync->confidence));
