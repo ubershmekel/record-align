@@ -28,7 +28,8 @@ struct SessionEdits {
   double out_seconds = 0.0;
 };
 
-constexpr const char* kEditsFileName = "edits.txt";
+constexpr const char* kEditsFileName = "project.reca";
+constexpr const char* kLegacyEditsFileName = "edits.txt";  // read-only backward compat
 
 // Replaces the file in one step, so a crash can't leave half of it behind.
 bool save_edits(const std::filesystem::path& session_dir, const SessionEdits& edits, std::string* err);

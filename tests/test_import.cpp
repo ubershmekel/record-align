@@ -60,7 +60,7 @@ TEST_CASE("importing keeps samples, rate and channels, and leaves the original a
   fs::path session;
   std::string err;
   std::atomic<float> progress{0.0f};
-  REQUIRE(import_files({input}, dir.path, &session, &progress, &err));
+  REQUIRE(import_files({input}, &session, &progress, &err));
   CHECK(progress.load() == 1.0f);
   CHECK(fs::file_size(input) == size_before);
 
@@ -99,7 +99,7 @@ TEST_CASE("a video file becomes the master even when it isn't first") {
 
   fs::path session;
   std::string err;
-  const bool imported = import_files({audio, video}, dir.path, &session, nullptr, &err);
+  const bool imported = import_files({audio, video}, &session, nullptr, &err);
   INFO(err);
   REQUIRE(imported);
   SessionEdits edits;
@@ -120,10 +120,8 @@ TEST_CASE("a file with no audio fails with a clear message and leaves nothing be
   fputs("not audio\n", f);
   fclose(f);
 
-  const fs::path base = dir.path / "out";
   fs::path session;
   std::string err;
-  CHECK_FALSE(import_files({bad}, base, &session, nullptr, &err));
+  CHECK_FALSE(import_files({bad}, &session, nullptr, &err));
   CHECK(err.find("notes.txt") != std::string::npos);
-  CHECK(fs::is_empty(base));
 }

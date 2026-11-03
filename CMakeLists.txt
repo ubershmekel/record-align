@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(mydaw LANGUAGES C CXX)
+project(record-align LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,8 +11,8 @@ if(NOT WIN32)
                       "macOS needs src/audio/capture_coreaudio.cpp and POSIX file mapping in wav.cpp.")
 endif()
 
-option(MYDAW_ASAN "Build with AddressSanitizer" OFF)
-option(MYDAW_APP "Build the desktop UI" ON)
+option(RA_ASAN "Build with AddressSanitizer" OFF)
+option(RA_APP "Build the desktop UI" ON)
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
@@ -54,7 +54,7 @@ FetchContent_MakeAvailable(SDL3 samplerate imgui pffft doctest)
 if(MSVC)
   add_compile_options(/utf-8)
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-  if(MYDAW_ASAN)
+  if(RA_ASAN)
     add_compile_options(/fsanitize=address /Zi)
     add_link_options(/INCREMENTAL:NO)
   endif()
@@ -66,7 +66,7 @@ add_library(pffft_lib STATIC
 target_include_directories(pffft_lib PUBLIC ${pffft_SOURCE_DIR}/include PRIVATE ${pffft_SOURCE_DIR}/include/pffft)
 target_compile_definitions(pffft_lib PUBLIC PFFFT_STATIC_DEFINE PRIVATE _USE_MATH_DEFINES)
 
-add_library(mydaw_core STATIC
+add_library(ra_core STATIC
   src/audio/capture_wasapi.cpp
   src/audio/edits.cpp
   src/audio/import.cpp
@@ -75,15 +75,15 @@ add_library(mydaw_core STATIC
   src/audio/wav.cpp
   src/sync/export.cpp
   src/sync/sync.cpp)
-target_include_directories(mydaw_core PUBLIC src)
-target_compile_definitions(mydaw_core PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(mydaw_core PUBLIC ole32 avrt PRIVATE pffft_lib samplerate)
+target_include_directories(ra_core PUBLIC src)
+target_compile_definitions(ra_core PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(ra_core PUBLIC ole32 avrt PRIVATE pffft_lib samplerate)
 
-add_executable(mydaw-cli src/cli/main.cpp)
-target_link_libraries(mydaw-cli PRIVATE mydaw_core)
+add_executable(record-align-cli src/cli/main.cpp)
+target_link_libraries(record-align-cli PRIVATE ra_core)
 
-if(MYDAW_APP)
-  add_executable(mydaw WIN32
+if(RA_APP)
+  add_executable(record-align WIN32
     src/app/main.cpp
     src/app/playback.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -92,12 +92,12 @@ if(MYDAW_APP)
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp)
-  target_include_directories(mydaw PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-  target_link_libraries(mydaw PRIVATE mydaw_core SDL3::SDL3-static)
+  target_include_directories(record-align PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+  target_link_libraries(record-align PRIVATE ra_core SDL3::SDL3-static)
 endif()
 
 enable_testing()
-add_executable(mydaw-tests
+add_executable(record-align-tests
   tests/test_edits.cpp
   tests/test_import.cpp
   tests/test_main.cpp
@@ -105,6 +105,6 @@ add_executable(mydaw-tests
   tests/test_soak.cpp
   tests/test_sync.cpp
   tests/test_wav.cpp)
-target_include_directories(mydaw-tests PRIVATE ${doctest_SOURCE_DIR})
-target_link_libraries(mydaw-tests PRIVATE mydaw_core)
-add_test(NAME mydaw-tests COMMAND mydaw-tests)
+target_include_directories(record-align-tests PRIVATE ${doctest_SOURCE_DIR})
+target_link_libraries(record-align-tests PRIVATE ra_core)
+add_test(NAME record-align-tests COMMAND record-align-tests)

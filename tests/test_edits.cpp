@@ -64,7 +64,7 @@ TEST_CASE("edits survive a save and load exactly") {
 
   std::string err;
   REQUIRE(save_edits(dir.path, edits, &err));
-  CHECK_FALSE(fs::exists(dir.path / "edits.txt.tmp"));
+  CHECK_FALSE(fs::exists(dir.path / "project.reca.tmp"));
 
   SessionEdits loaded;
   REQUIRE(load_edits(dir.path, &loaded));
@@ -101,7 +101,7 @@ TEST_CASE("a session without edits, or with an unknown file, loads nothing") {
   SessionEdits loaded;
   CHECK_FALSE(load_edits(dir.path, &loaded));
 
-  FILE* f = _wfopen((dir.path / "edits.txt").c_str(), L"w");
+  FILE* f = _wfopen((dir.path / "project.reca").c_str(), L"w");
   REQUIRE(f);
   fputs("something else\ntrack x\n", f);
   fclose(f);

@@ -20,8 +20,8 @@ bool looks_like_video(const std::filesystem::path& path);
 // time zero, so the WAV's timeline matches the video's.
 bool extract_audio(const std::filesystem::path& input, const std::filesystem::path& output_wav, std::string* err);
 
-// Creates a new session folder inside base_dir, with one WAV per input and a note
-// of where each came from. Sets out_dir and picks the master: the first video, or
-// else the first file.
-bool import_files(const std::vector<std::filesystem::path>& inputs, const std::filesystem::path& base_dir,
+// Creates a new session folder in the system temp directory, with one WAV per input
+// and a note of where each came from. Sets out_dir and picks the master: the first
+// video, or else the first file.
+bool import_files(const std::vector<std::filesystem::path>& inputs,
                   std::filesystem::path* out_dir, std::atomic<float>* progress, std::string* err);

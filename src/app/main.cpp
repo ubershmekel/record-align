@@ -195,12 +195,16 @@ struct App {
   std::string dialog_record_dir;
   std::string dialog_session_dir;
   std::vector<std::string> dialog_import_files;
+  std::string dialog_save_dir;  // For Save project...
 
   std::vector<std::string> dropped_files;
   fs::path job_imported_session;  // Set by the import job, guarded by job_mutex.
+  fs::path job_saved_session;     // Set by the save-project job, guarded by job_mutex.
 
-  int tab_request = 0;  // 1 selects Record, 2 selects Edit.
+  int tab_request = 0;  // 1 selects Record, 2 selects Edit, 3 selects Settings.
   bool edit_tab_was_open = false;
+  std::string last_open_dir;        // Persisted across sessions.
+  bool session_is_permanent = true; // False for fresh imports not yet saved to a folder.
 };
 
 AudioView view_of(const WavFile& wav) {
@@ -555,11 +559,10 @@ void start_import_job(App& app, const std::vector<std::string>& files) {
   app.job_message.clear();
   app.job_failed = false;
   app.tab_request = 2;
-  const fs::path base_dir = fs::u8path(app.base_dir);
-  app.job_thread = std::thread([&app, inputs, base_dir] {
+  app.job_thread = std::thread([&app, inputs] {
     fs::path session;
     std::string err;
-    const bool ok = import_files(inputs, base_dir, &session, &app.job_progress, &err);
+    const bool ok = import_files(inputs, &session, &app.job_progress, &err);
     std::lock_guard<std::mutex> lock(app.job_mutex);
     app.job_failed = !ok;
     app.job_message = ok ? std::string() : err;
@@ -578,8 +581,23 @@ void collect_import_result(App& app) {
     app.job_imported_session.clear();
   }
   load_session_into_editor(app, session);
+  app.session_is_permanent = false;
   app.match_master = true;
   start_sync_job(app);
+}
+
+// Once a save-project job finishes, reloads from the new permanent location.
+void collect_save_result(App& app) {
+  fs::path saved;
+  {
+    std::lock_guard<std::mutex> lock(app.job_mutex);
+    if (app.job_running.load() || app.job_saved_session.empty()) return;
+    saved = app.job_saved_session;
+    app.job_saved_session.clear();
+  }
+  load_session_into_editor(app, saved);
+  app.session_is_permanent = true;
+  app.last_open_dir = saved.parent_path().u8string();
 }
 
 // Sets each track's gain so its loudest moment inside the trim range reaches the
@@ -620,6 +638,80 @@ void normalize_all(App& app) {
   app.job_failed = false;
 }
 
+std::string pref_dir() {
+  const char* p = SDL_GetPrefPath("record-align", "record-align");
+  if (!p) return {};
+  std::string r(p);
+  SDL_free((void*)p);
+  return r;
+}
+
+void save_prefs(const App& app) {
+  const std::string dir = pref_dir();
+  if (dir.empty()) return;
+  FILE* f = _wfopen((fs::u8path(dir) / "prefs.txt").c_str(), L"w");
+  if (!f) return;
+  fprintf(f, "record_dir %s\n", app.base_dir.c_str());
+  if (!app.last_open_dir.empty()) fprintf(f, "open_dir %s\n", app.last_open_dir.c_str());
+  fclose(f);
+}
+
+void load_prefs(App& app) {
+  const std::string dir = pref_dir();
+  if (dir.empty()) return;
+  FILE* f = _wfopen((fs::u8path(dir) / "prefs.txt").c_str(), L"r");
+  if (!f) return;
+  char line[4096];
+  while (fgets(line, sizeof(line), f)) {
+    std::string s(line);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    if (s.size() > 11 && s.substr(0, 11) == "record_dir ") app.base_dir = s.substr(11);
+    if (s.size() > 9 && s.substr(0, 9) == "open_dir ") app.last_open_dir = s.substr(9);
+  }
+  fclose(f);
+}
+
+void start_save_session_job(App& app, const fs::path& dest) {
+  if (app.job_running.load() || app.session.dir.empty()) return;
+  finish_job(app);
+  save_session_edits(app);
+  const fs::path src = app.session.dir;
+  app.job_running.store(true);
+  app.job_progress.store(0.0f);
+  app.job_label = "Saving project";
+  app.job_message.clear();
+  app.job_failed = false;
+  app.job_thread = std::thread([&app, src, dest] {
+    std::error_code ec;
+    fs::create_directories(dest, ec);
+    if (ec) {
+      std::lock_guard<std::mutex> g(app.job_mutex);
+      app.job_failed = true;
+      app.job_message = "Could not create " + dest.u8string() + ": " + ec.message();
+      app.job_running.store(false);
+      return;
+    }
+    std::vector<fs::path> entries;
+    for (const auto& e : fs::directory_iterator(src, ec)) {
+      if (e.is_regular_file()) entries.push_back(e.path());
+    }
+    for (size_t i = 0; i < entries.size(); i++) {
+      fs::copy(entries[i], dest / entries[i].filename(), fs::copy_options::overwrite_existing, ec);
+      if (ec) {
+        std::lock_guard<std::mutex> g(app.job_mutex);
+        app.job_failed = true;
+        app.job_message = "Could not copy " + entries[i].filename().u8string() + ": " + ec.message();
+        app.job_running.store(false);
+        return;
+      }
+      app.job_progress.store(float(i + 1) / entries.size());
+    }
+    std::lock_guard<std::mutex> g(app.job_mutex);
+    app.job_saved_session = dest;
+    app.job_running.store(false);
+  });
+}
+
 void SDLCALL on_record_folder(void* user, const char* const* files, int) {
   App& app = *static_cast<App*>(user);
   if (!files || !files[0]) return;
@@ -648,6 +740,31 @@ void SDLCALL on_session_folder(void* user, const char* const* files, int) {
   if (!files || !files[0]) return;
   std::lock_guard<std::mutex> lock(app.dialog_mutex);
   app.dialog_session_dir = files[0];
+}
+
+void SDLCALL on_save_folder(void* user, const char* const* files, int) {
+  App& app = *static_cast<App*>(user);
+  if (!files || !files[0]) return;
+  std::lock_guard<std::mutex> lock(app.dialog_mutex);
+  app.dialog_save_dir = files[0];
+}
+
+void draw_settings_tab(App& app) {
+  ImGui::Spacing();
+  ImGui::SeparatorText("Recordings");
+  const bool recording = app.recorder.recording();
+  ImGui::BeginDisabled(recording);
+  if (ImGui::Button("Choose folder...")) {
+    SDL_ShowOpenFolderDialog(on_record_folder, &app, app.window, app.base_dir.c_str(), false);
+  }
+  ImGui::EndDisabled();
+  tip("Where new recordings are saved. Each recording gets its own subfolder inside this one.");
+  ImGui::SameLine();
+  ImGui::TextUnformatted(app.base_dir.c_str());
+  ImGui::Spacing();
+  ImGui::PushTextWrapPos(0.0f);
+  ImGui::TextColored(kMuted, "Preferences are saved automatically when you change them.");
+  ImGui::PopTextWrapPos();
 }
 
 void draw_meter(float level, float hold, const ImVec2& size) {
@@ -693,6 +810,22 @@ void draw_clap_guide(App& app, bool recording) {
 
 void draw_record_tab(App& app) {
   const bool recording = app.recorder.recording();
+
+  // Quick launcher: open or import before recording.
+  ImGui::Spacing();
+  const bool busy = app.job_running.load();
+  ImGui::BeginDisabled(recording || busy);
+  if (ImGui::Button("Open saved project...")) {
+    const char* start = app.last_open_dir.empty() ? app.base_dir.c_str() : app.last_open_dir.c_str();
+    SDL_ShowOpenFolderDialog(on_session_folder, &app, app.window, start, false);
+  }
+  tip("Open a folder of recordings made earlier. Any edits you made to it come back too.");
+  ImGui::SameLine();
+  if (ImGui::Button("Import video or audio files...")) show_import_dialog(app);
+  tip("Line up video and audio files you already have, such as a phone video and a separate microphone. "
+      "This needs ffmpeg installed. You can also drag files onto this window.");
+  ImGui::EndDisabled();
+  ImGui::Spacing();
 
   draw_clap_guide(app, recording);
 
@@ -1066,16 +1199,36 @@ void draw_edit_tab(App& app) {
   collect_sync_results(app);
   sync_playback(app);
 
+  const bool busy = app.job_running.load();
+  if (!app.session_is_permanent && !app.session.dir.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.46f, 0.76f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.56f, 0.88f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.13f, 0.36f, 0.60f, 1.0f));
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button("Save project...")) {
+      const char* start = app.last_open_dir.empty() ? app.base_dir.c_str() : app.last_open_dir.c_str();
+      SDL_ShowOpenFolderDialog(on_save_folder, &app, app.window, start, false);
+    }
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor(3);
+    tip("Choose a folder to save this project to. The audio files are copied there. "
+        "Your original files are not changed.");
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(kAmber, "Not saved — changes may be lost.");
+    ImGui::SameLine();
+  }
   if (ImGui::Button("Open session folder...")) {
-    SDL_ShowOpenFolderDialog(on_session_folder, &app, app.window, app.base_dir.c_str(), false);
+    const char* start = app.last_open_dir.empty() ? app.base_dir.c_str() : app.last_open_dir.c_str();
+    SDL_ShowOpenFolderDialog(on_session_folder, &app, app.window, start, false);
   }
   tip("Open a folder of recordings made earlier. Any edits you made to it come back too.");
   ImGui::SameLine();
-  ImGui::BeginDisabled(app.job_running.load());
+  ImGui::BeginDisabled(busy);
   if (ImGui::Button("Import files...")) show_import_dialog(app);
   ImGui::EndDisabled();
   tip("Line up video and audio files you already have, for example a phone video and a separate microphone. The audio "
-      "is copied out into a new session, and the first video becomes the master. Your files are not changed. This "
+      "is pulled out into a temporary session, and the first video becomes the master. Your files are not changed. This "
       "needs ffmpeg installed. You can also drag files onto this window.");
   if (!app.session.dir.empty()) {
     ImGui::SameLine();
@@ -1111,7 +1264,6 @@ void draw_edit_tab(App& app) {
     return;
   }
 
-  const bool busy = app.job_running.load();
   const float scale = ImGui::GetStyle().FontScaleDpi;
 
   // Transport
@@ -1420,20 +1572,32 @@ void draw_edit_tab(App& app) {
 }
 
 void apply_dialog_results(App& app) {
-  std::lock_guard<std::mutex> lock(app.dialog_mutex);
-  if (!app.dialog_record_dir.empty()) {
-    app.base_dir = app.dialog_record_dir;
-    app.dialog_record_dir.clear();
+  std::string record_dir, session_dir, save_dir;
+  std::vector<std::string> import_files;
+  {
+    std::lock_guard<std::mutex> lock(app.dialog_mutex);
+    record_dir.swap(app.dialog_record_dir);
+    session_dir.swap(app.dialog_session_dir);
+    save_dir.swap(app.dialog_save_dir);
+    import_files.swap(app.dialog_import_files);
+  }
+  if (!record_dir.empty()) {
+    app.base_dir = record_dir;
     app.disk_checked_at = -100.0;
+    save_prefs(app);
   }
-  if (!app.dialog_session_dir.empty()) {
-    load_session_into_editor(app, fs::u8path(app.dialog_session_dir));
+  if (!session_dir.empty()) {
+    app.last_open_dir = fs::u8path(session_dir).parent_path().u8string();
+    load_session_into_editor(app, fs::u8path(session_dir));
+    app.session_is_permanent = true;
     app.tab_request = 2;
-    app.dialog_session_dir.clear();
+    save_prefs(app);
   }
-  if (!app.dialog_import_files.empty()) {
-    start_import_job(app, app.dialog_import_files);
-    app.dialog_import_files.clear();
+  if (!save_dir.empty()) {
+    start_save_session_job(app, fs::u8path(save_dir));
+  }
+  if (!import_files.empty()) {
+    start_import_job(app, import_files);
   }
 }
 
@@ -1574,14 +1738,14 @@ int main(int argc, char** argv) {
   }
 
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS)) {
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MyDAW", SDL_GetError(), nullptr);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "record-align", SDL_GetError(), nullptr);
     return 1;
   }
   const float dpi = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
-  SDL_Window* window = SDL_CreateWindow("MyDAW", int(1180 * dpi), int(760 * dpi), SDL_WINDOW_RESIZABLE);
+  SDL_Window* window = SDL_CreateWindow("record-align", int(1180 * dpi), int(760 * dpi), SDL_WINDOW_RESIZABLE);
   SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
   if (!renderer) {
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MyDAW", SDL_GetError(), nullptr);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "record-align", SDL_GetError(), nullptr);
     return 1;
   }
   SDL_SetRenderVSync(renderer, 1);
@@ -1623,7 +1787,8 @@ int main(int argc, char** argv) {
   App& app = *app_owner;
   app.window = window;
   const char* music = SDL_GetUserFolder(SDL_FOLDER_MUSIC);
-  app.base_dir = (fs::u8path(music ? music : ".") / "MyDAW Recordings").u8string();
+  app.base_dir = (fs::u8path(music ? music : ".") / "record-align Recordings").u8string();
+  load_prefs(app);
   if (base_dir_override) app.base_dir = base_dir_override;
   refresh_devices(app);
   if (arm_all) {
@@ -1657,6 +1822,7 @@ int main(int argc, char** argv) {
 
     apply_dialog_results(app);
     collect_import_result(app);
+    collect_save_result(app);
     app.status = app.recorder.status();  // Reads and resets the meters, so call it once per frame.
 
     bool script_done = false;
@@ -1682,6 +1848,7 @@ int main(int argc, char** argv) {
     if (tab_bar_open) {
       ImGuiTabItemFlags record_flags = app.tab_request == 1 ? ImGuiTabItemFlags_SetSelected : 0;
       ImGuiTabItemFlags edit_flags = app.tab_request == 2 ? ImGuiTabItemFlags_SetSelected : 0;
+      ImGuiTabItemFlags settings_flags = app.tab_request == 3 ? ImGuiTabItemFlags_SetSelected : 0;
       app.tab_request = 0;
       auto begin_tab = [&](const char* label, bool selected_before, ImGuiTabItemFlags flags) {
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tab_padding);
@@ -1699,6 +1866,10 @@ int main(int argc, char** argv) {
       if (begin_tab("Edit", app.edit_tab_was_open, edit_flags)) {
         edit_tab_open = true;
         draw_edit_tab(app);
+        ImGui::EndTabItem();
+      }
+      if (begin_tab("Settings", false, settings_flags)) {
+        draw_settings_tab(app);
         ImGui::EndTabItem();
       }
       app.edit_tab_was_open = edit_tab_open;

@@ -7,7 +7,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char* kHeader = "mydaw-edits 1";
+constexpr const char* kHeader = "record-align 1";
+constexpr const char* kLegacyHeader = "mydaw-edits 1";
 
 int method_to_int(SyncMethod method) { return method == SyncMethod::Audio ? 1 : (method == SyncMethod::Timestamps ? 2 : 0); }
 
@@ -71,10 +72,13 @@ bool save_edits(const fs::path& session_dir, const SessionEdits& edits, std::str
 bool load_edits(const fs::path& session_dir, SessionEdits* out) {
   *out = SessionEdits();
   FILE* f = _wfopen((session_dir / kEditsFileName).c_str(), L"r");
+  if (!f) f = _wfopen((session_dir / kLegacyEditsFileName).c_str(), L"r");
   if (!f) return false;
 
   char line[1024];
-  if (!fgets(line, sizeof(line), f) || rest_of_line(line, 0) != kHeader) {
+  if (!fgets(line, sizeof(line), f)) { fclose(f); return false; }
+  const std::string header = rest_of_line(line, 0);
+  if (header != kHeader && header != kLegacyHeader) {
     fclose(f);
     return false;
   }

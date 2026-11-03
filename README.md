@@ -1,4 +1,4 @@
-# MyDAW
+# record-align
 
 **Line up audio from different devices, using a few claps.**
 
@@ -29,8 +29,8 @@ Any sharp sound works, and shared speech often does too, but claps are the most 
 ## Install
 
 **Windows:** download the zip from the
-[Releases](../../releases) page, unzip it and run `mydaw.exe`. Importing files also needs
-[ffmpeg](https://ffmpeg.org/download.html) on your PATH. Recording doesn't.
+[Releases](../../releases) page, unzip it and run `record-align.exe`. Importing files
+also needs [ffmpeg](https://ffmpeg.org/download.html) on your PATH. Recording doesn't.
 
 macOS isn't supported yet.
 
@@ -42,17 +42,19 @@ macOS isn't supported yet.
 4. Press **Open in editor**, then **Align tracks**.
 5. Check the result, then press **Export aligned WAVs**.
 
-Recordings go in `Music\MyDAW Recordings` unless you choose another folder.
+Recordings go in `Music\record-align Recordings` unless you choose another folder in
+**Settings**.
 
 ## Line up existing files
 
-1. On the **Edit** tab, press **Import files...**, or drag files onto the window. Video and
-   audio files both work, such as a phone video and a recorder's WAV.
-2. The app copies out the audio and aligns it straight away. The first video becomes the
+1. Press **Import files...** on the Record or Edit tab, or drag files onto the window.
+   Video and audio files both work, such as a phone video and a recorder's WAV.
+2. The app imports the audio and aligns it straight away. The first video becomes the
    **master track**, the one everything else lines up with. Press **Make master** on another
    track to change that.
-3. Press **Export aligned WAVs**. With **Match master's length** on, which is the default
-   for imports, each file starts and ends exactly with the master.
+3. Press **Save project...** to keep the project, then **Export aligned WAVs**.
+   With **Match master's length** on, which is the default for imports, each file starts
+   and ends exactly with the master.
 4. In your editor, put the video and the exported files at time zero.
 
 If you have several videos, each one's audio can be aligned, but the videos themselves
@@ -100,7 +102,7 @@ distances.
 | `01_name.timing.csv`... | Capture timestamps and any gaps. Recordings only. |
 | `session.json` | Recording details. Recordings only. |
 | `sources.txt` | Which original file each track came from. Imports only. |
-| `edits.txt` | Your alignment, gain, mute and trim. Saved automatically. |
+| `project.reca` | Your alignment, gain, mute and trim. Saved automatically. |
 | `aligned/` | What you exported. |
 
 ## Limitations
@@ -129,18 +131,18 @@ libraries download on the first build.
 build.cmd
 ```
 
-The app is at `build\Release\mydaw.exe`, with a command-line tool beside it:
+The app is at `build\Release\record-align.exe`, with a command-line tool beside it:
 
 ```bash
-build\Release\mydaw-cli.exe list
+build\Release\record-align-cli.exe list
 ```
 
 ```bash
-build\Release\mydaw-cli.exe record --device 0 --device 2 --seconds 3600 --out recordings
+build\Release\record-align-cli.exe record --device 0 --device 2 --seconds 3600 --out recordings
 ```
 
 ```bash
-build\Release\mydaw-cli.exe sync recordings\SESSION --export --mix
+build\Release\record-align-cli.exe sync recordings\SESSION --export --mix
 ```
 
 ### Code map
@@ -151,7 +153,7 @@ build\Release\mydaw-cli.exe sync recordings\SESSION --export --mix
 | `src/audio/recorder.cpp` | Ring buffers, disk thread, and silence in place of anything missing. |
 | `src/audio/wav.cpp` | WAV writing that survives crashes, RF64 past 4 GB, and memory-mapped reading. |
 | `src/audio/import.cpp` | Pulls audio out of existing files with ffmpeg. |
-| `src/audio/edits.cpp` | Reads and writes `edits.txt`. |
+| `src/audio/edits.cpp` | Reads and writes `project.reca`. |
 | `src/sync/sync.cpp` | Works out offset and drift. |
 | `src/sync/export.cpp` | Resampling and export, using libsamplerate. |
 | `src/app/` | The Dear ImGui and SDL3 interface. |
@@ -167,7 +169,7 @@ build\Release\mydaw-cli.exe sync recordings\SESSION --export --mix
 ### Tests
 
 ```bash
-build\Release\mydaw-tests.exe
+build\Release\record-align-tests.exe
 ```
 
 These use generated audio with known offsets, drift, noise, levels and sample rates, plus
@@ -176,7 +178,7 @@ Two slower checks are off by default: an hour of simulated capture at about 50×
 real file over 4 GB.
 
 ```bash
-build\Release\mydaw-tests.exe --no-skip -tc="soak*"
+build\Release\record-align-tests.exe --no-skip -tc="soak*"
 ```
 
 The app also takes test flags, listed above `main` in `src/app/main.cpp`. `--script` plays

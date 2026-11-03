@@ -4,12 +4,12 @@ param([string]$Version = "dev")
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
-$name = "mydaw-$Version-windows-x64"
+$name = "record-align-$Version-windows-x64"
 $stage = Join-Path $root "dist\$name"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 
-foreach ($file in "mydaw.exe", "mydaw-cli.exe") {
+foreach ($file in "record-align.exe", "record-align-cli.exe") {
   Copy-Item (Join-Path $root "build\Release\$file") $stage
 }
 Copy-Item (Join-Path $root "README.md") $stage

@@ -154,7 +154,7 @@ bool extract_audio(const fs::path& input, const fs::path& output_wav, std::strin
   return true;
 }
 
-bool import_files(const std::vector<fs::path>& inputs, const fs::path& base_dir, fs::path* out_dir,
+bool import_files(const std::vector<fs::path>& inputs, fs::path* out_dir,
                   std::atomic<float>* progress, std::string* err) {
   if (inputs.empty()) {
     if (err) *err = "No files to import";
@@ -170,7 +170,7 @@ bool import_files(const std::vector<fs::path>& inputs, const fs::path& base_dir,
   localtime_s(&local, &now);
   char stamp[64];
   strftime(stamp, sizeof(stamp), "import_%Y-%m-%d_%H-%M-%S", &local);
-  const fs::path dir = base_dir / stamp;
+  const fs::path dir = fs::temp_directory_path() / "record-align" / stamp;
   std::error_code ec;
   fs::create_directories(dir, ec);
   if (ec) {

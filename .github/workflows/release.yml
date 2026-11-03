@@ -26,7 +26,7 @@ jobs:
         run: choco install ffmpeg --no-progress -y
 
       - name: Test
-        run: build\Release\mydaw-tests.exe
+        run: build\Release\record-align-tests.exe
 
       - name: Package
         shell: pwsh
