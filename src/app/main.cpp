@@ -193,6 +193,7 @@ struct App {
   std::string dialog_session_dir;
 
   int tab_request = 0;  // 1 selects Record, 2 selects Edit.
+  bool edit_tab_was_open = false;
 };
 
 AudioView view_of(const WavFile& wav) {
@@ -1113,8 +1114,11 @@ void draw_edit_tab(App& app) {
     ImGui::SameLine();
     ImGui::ProgressBar(app.job_progress.load(), ImVec2(160.0f * scale, 0.0f), app.job_label.c_str());
   }
+  // This line is always here, so a message appearing doesn't shift the timeline.
   if (!busy && !app.job_message.empty()) {
     ImGui::TextColored(app.job_failed ? kRed : kGreen, "%s", app.job_message.c_str());
+  } else {
+    ImGui::TextUnformatted(" ");
   }
 
   // Timeline
@@ -1315,6 +1319,81 @@ void apply_dialog_results(App& app) {
   }
 }
 
+// Test hook: plays clicks and keys from a text file into the UI, one line every
+// few frames, and logs the resulting state. Lines look like "click 51 296",
+// "rclick 300 299", "ctrl z", "ctrlshift z", "key space", "shift on", "shift off",
+// "wait 30" or "log label".
+struct UiScript {
+  FILE* input = nullptr;
+  FILE* output = nullptr;
+  int wait_frames = 0;
+};
+
+ImGuiKey script_key(const char* name) {
+  if (!strcmp(name, "space")) return ImGuiKey_Space;
+  if (!strcmp(name, "z")) return ImGuiKey_Z;
+  if (!strcmp(name, "y")) return ImGuiKey_Y;
+  return ImGuiKey_None;
+}
+
+void log_ui_state(App& app, FILE* out, const char* label) {
+  fprintf(out, "%-22s", label);
+  for (size_t i = 0; i < app.edit.tracks.size(); i++) {
+    const TrackEditState& e = app.edit.tracks[i];
+    fprintf(out, " [gain %.1f mute %d solo %d]", e.gain_db, e.mute ? 1 : 0, app.tracks[i]->playback.solo.load() ? 1 : 0);
+  }
+  if (app.edit.in_set) fprintf(out, " in %.2f", app.edit.in_point);
+  if (app.edit.out_set) fprintf(out, " out %.2f", app.edit.out_point);
+  fprintf(out, " playing %d undo %zu redo %zu\n", app.playback.playing() ? 1 : 0, app.undo_stack.size(),
+          app.redo_stack.size());
+  fflush(out);
+}
+
+// Returns false once the script has finished.
+bool run_ui_script(App& app, UiScript& script) {
+  if (script.wait_frames-- > 0) return true;
+  script.wait_frames = 12;
+
+  char line[256];
+  if (!fgets(line, sizeof(line), script.input)) return false;
+  char word[32] = {};
+  char text[128] = {};
+  float x = 0.0f, y = 0.0f;
+  sscanf(line, "%31s %127[^\n]", word, text);
+  sscanf(text, "%f %f", &x, &y);
+  ImGuiIO& io = ImGui::GetIO();
+  auto click = [&](ImGuiMouseButton button) {
+    io.AddMousePosEvent(x, y);
+    io.AddMouseButtonEvent(button, true);
+    io.AddMouseButtonEvent(button, false);
+  };
+  auto press = [&](const char* name) {
+    io.AddKeyEvent(script_key(name), true);
+    io.AddKeyEvent(script_key(name), false);
+  };
+  if (!strcmp(word, "click")) {
+    click(ImGuiMouseButton_Left);
+  } else if (!strcmp(word, "rclick")) {
+    click(ImGuiMouseButton_Right);
+  } else if (!strcmp(word, "key")) {
+    press(text);
+  } else if (!strcmp(word, "ctrl") || !strcmp(word, "ctrlshift")) {
+    const bool shift = !strcmp(word, "ctrlshift");
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    if (shift) io.AddKeyEvent(ImGuiMod_Shift, true);
+    press(text);
+    if (shift) io.AddKeyEvent(ImGuiMod_Shift, false);
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+  } else if (!strcmp(word, "shift")) {
+    io.AddKeyEvent(ImGuiMod_Shift, !strcmp(text, "on"));
+  } else if (!strcmp(word, "wait")) {
+    script.wait_frames = int(x);
+  } else if (!strcmp(word, "log")) {
+    log_ui_state(app, script.output, text);
+  }
+  return true;
+}
+
 bool save_screenshot(SDL_Renderer* renderer, const char* path) {
   SDL_Surface* surface = SDL_RenderReadPixels(renderer, nullptr);
   if (!surface) return false;
@@ -1325,11 +1404,13 @@ bool save_screenshot(SDL_Renderer* renderer, const char* path) {
 
 }  // namespace
 
-// Optional flags for automated checks: --open DIR, --align, --arm-all,
-// --tab edit, --screenshot FILE.bmp (saves after --frames N frames, then exits).
+// Optional flags for automated checks: --open DIR, --align, --arm-all, --tab edit,
+// --script IN.txt OUT.txt, --screenshot FILE.bmp (saves after --frames N frames or
+// when the script ends, then exits).
 int main(int argc, char** argv) {
   const char* open_dir = nullptr;
   const char* screenshot_path = nullptr;
+  UiScript script;
   bool auto_align = false;
   bool arm_all = false;
   bool start_on_edit = false;
@@ -1341,6 +1422,9 @@ int main(int argc, char** argv) {
       screenshot_path = argv[++i];
     } else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
       screenshot_frames = atoi(argv[++i]);
+    } else if (!strcmp(argv[i], "--script") && i + 2 < argc) {
+      script.input = fopen(argv[++i], "r");
+      script.output = fopen(argv[++i], "w");
     } else if (!strcmp(argv[i], "--align")) {
       auto_align = true;
     } else if (!strcmp(argv[i], "--arm-all")) {
@@ -1372,6 +1456,24 @@ int main(int argc, char** argv) {
   style.WindowRounding = 0.0f;
   style.FrameRounding = 4.0f;
   style.ChildRounding = 4.0f;
+  // Blue marks what's selected, so plain buttons are neutral. Tabs have no box
+  // until selected, when they join the page below with a bright top edge.
+  ImVec4* colors = style.Colors;
+  const ImVec4 accent(0.36f, 0.66f, 0.96f, 1.0f);
+  const ImVec4 selected_tab(0.20f, 0.22f, 0.26f, 1.0f);
+  colors[ImGuiCol_Button] = ImVec4(0.26f, 0.28f, 0.32f, 1.0f);
+  colors[ImGuiCol_ButtonHovered] = ImVec4(0.34f, 0.37f, 0.42f, 1.0f);
+  colors[ImGuiCol_ButtonActive] = ImVec4(0.42f, 0.46f, 0.52f, 1.0f);
+  colors[ImGuiCol_Tab] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+  colors[ImGuiCol_TabDimmed] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+  colors[ImGuiCol_TabHovered] = ImVec4(0.17f, 0.18f, 0.21f, 1.0f);
+  colors[ImGuiCol_TabSelected] = selected_tab;
+  colors[ImGuiCol_TabDimmedSelected] = selected_tab;
+  colors[ImGuiCol_TabSelectedOverline] = accent;
+  colors[ImGuiCol_TabDimmedSelectedOverline] = accent;
+  style.TabRounding = 0.0f;
+  style.TabBarBorderSize = 1.0f;
+  style.TabBarOverlineSize = 2.0f;
   style.ScaleAllSizes(dpi);
   style.FontScaleDpi = dpi;
   if (fs::exists("C:/Windows/Fonts/segoeui.ttf")) io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", 16.0f);
@@ -1399,7 +1501,7 @@ int main(int argc, char** argv) {
   while (running) {
     SDL_Event event;
     // Stay light when nothing is moving. Meters and playback need steady redraws.
-    const bool animating = !app.status.empty() || app.playback.playing() || app.job_running.load();
+    const bool animating = !app.status.empty() || app.playback.playing() || app.job_running.load() || script.input;
     if (SDL_WaitEventTimeout(&event, animating ? 16 : 100)) {
       do {
         ImGui_ImplSDL3_ProcessEvent(&event);
@@ -1413,6 +1515,13 @@ int main(int argc, char** argv) {
     apply_dialog_results(app);
     app.status = app.recorder.status();  // Reads and resets the meters, so call it once per frame.
 
+    bool script_done = false;
+    if (script.input && frame > 30 && !app.job_running.load()) {
+      bool peaks_done = true;
+      for (const auto& t : app.tracks) peaks_done = peaks_done && t->peaks_ready.load();
+      if (peaks_done) script_done = !run_ui_script(app, script);
+    }
+
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
@@ -1422,20 +1531,33 @@ int main(int argc, char** argv) {
     ImGui::Begin("main", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus);
-    if (ImGui::BeginTabBar("tabs")) {
+    const ImVec2 tab_padding(18.0f * dpi, 9.0f * dpi);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tab_padding);
+    const bool tab_bar_open = ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_DrawSelectedOverline);
+    ImGui::PopStyleVar();
+    if (tab_bar_open) {
       ImGuiTabItemFlags record_flags = app.tab_request == 1 ? ImGuiTabItemFlags_SetSelected : 0;
       ImGuiTabItemFlags edit_flags = app.tab_request == 2 ? ImGuiTabItemFlags_SetSelected : 0;
       app.tab_request = 0;
-      if (ImGui::BeginTabItem("Record", nullptr, record_flags)) {
+      auto begin_tab = [&](const char* label, bool selected_before, ImGuiTabItemFlags flags) {
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, tab_padding);
+        ImGui::PushStyleColor(ImGuiCol_Text, selected_before ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : kMuted);
+        const bool open = ImGui::BeginTabItem(label, nullptr, flags);
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+        return open;
+      };
+      bool edit_tab_open = false;
+      if (begin_tab("Record", !app.edit_tab_was_open, record_flags)) {
         draw_record_tab(app);
         ImGui::EndTabItem();
       }
-      bool edit_tab_open = false;
-      if (ImGui::BeginTabItem("Edit", nullptr, edit_flags)) {
+      if (begin_tab("Edit", app.edit_tab_was_open, edit_flags)) {
         edit_tab_open = true;
         draw_edit_tab(app);
         ImGui::EndTabItem();
       }
+      app.edit_tab_was_open = edit_tab_open;
       ImGui::EndTabBar();
       // Only on the Edit tab, so a stray key press can't touch a recording.
       if (edit_tab_open && !app.tracks.empty() && !io.WantTextInput) {
@@ -1459,8 +1581,12 @@ int main(int argc, char** argv) {
 
     frame++;
     const bool settled = !app.job_running.load() && (app.tracks.empty() || app.tracks.back()->peaks_ready.load());
-    if (screenshot_path && frame >= screenshot_frames && settled) {
+    if (screenshot_path && !script.input && frame >= screenshot_frames && settled) {
       save_screenshot(renderer, screenshot_path);
+      running = false;
+    }
+    if (script_done) {
+      if (screenshot_path) save_screenshot(renderer, screenshot_path);
       running = false;
     }
     SDL_RenderPresent(renderer);
