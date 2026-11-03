@@ -82,8 +82,19 @@ target_link_libraries(ra_core PUBLIC ole32 avrt PRIVATE pffft_lib samplerate)
 add_executable(record-align-cli src/cli/main.cpp)
 target_link_libraries(record-align-cli PRIVATE ra_core)
 
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE RA_GIT_HASH
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET)
+if(NOT RA_GIT_HASH)
+  set(RA_GIT_HASH "unknown")
+endif()
+
 if(RA_APP)
   configure_file(src/app/app.rc.in ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
+  configure_file(src/app/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/version.h @ONLY)
   add_executable(record-align WIN32
     src/app/main.cpp
     src/app/playback.cpp
@@ -94,7 +105,7 @@ if(RA_APP)
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp)
-  target_include_directories(record-align PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+  target_include_directories(record-align PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends ${CMAKE_CURRENT_BINARY_DIR})
   target_link_libraries(record-align PRIVATE ra_core SDL3::SDL3-static)
 endif()
 

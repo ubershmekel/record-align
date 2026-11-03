@@ -20,6 +20,7 @@
 #include <thread>
 #include <vector>
 
+#include "version.h"
 #include "app/playback.h"
 #include "audio/capture.h"
 #include "audio/edits.h"
@@ -797,6 +798,8 @@ void draw_settings_tab(App& app) {
   ImGui::PopTextWrapPos();
   ImGui::Spacing();
   ImGui::SeparatorText("About");
+  ImGui::Text("Version: %s  built %s %s", RA_GIT_HASH, __DATE__, __TIME__);
+  ImGui::Spacing();
   ImGui::TextUnformatted("record-align on GitHub:");
   ImGui::SameLine();
   const char* kGithubUrl = "https://github.com/ubershmekel/record-align";

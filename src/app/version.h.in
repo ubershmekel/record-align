@@ -1,0 +1,2 @@
+#pragma once
+#define RA_GIT_HASH "@RA_GIT_HASH@"
