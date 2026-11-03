@@ -1,8 +1,10 @@
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include "audio/recorder.h"
@@ -492,6 +494,8 @@ TEST_CASE("full path: recorder files and timestamps through session loading to s
       p.samples = tb.data() + f;
       p.host_seconds = 500.0 + (double(f) / 48000 - pb.offset) / (1.0 + pb.drift) + latency;
       sinks[1]->on_packet(p);
+      // Far faster than real time, but slow enough not to overflow the ring buffers.
+      if (f % (packet * 100) == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     recorder.stop();
   }

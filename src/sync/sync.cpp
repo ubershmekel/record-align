@@ -518,6 +518,7 @@ SyncResult evaluate_plan(const AudioView& ref, const AudioView& other, int rate,
   result.anchors_usable = usable;
   result.residual_rms_ms = fit.rms * 1000.0;
   result.drift_measured = fit.drift_measured;
+  result.matched_span_seconds = fit.span;
   if (fit.inliers == 0) return result;
 
   // Any two points fit a line perfectly, so two matches prove nothing.
@@ -538,7 +539,7 @@ SyncResult evaluate_plan(const AudioView& ref, const AudioView& other, int rate,
   return result;
 }
 
-void set_message(SyncResult* r, bool have_prior) {
+void set_message(SyncResult* r, bool have_prior, double duration) {
   char buffer[512];
   double offset_ms = r->map.offset_seconds * 1000.0;
   double ppm = r->map.drift * 1e6;
@@ -556,6 +557,12 @@ void set_message(SyncResult* r, bool have_prior) {
              "Offset %.2f ms, drift %.2f ppm, but strong matches disagree with one straight line. The clock may "
              "have jumped, or speakers may be at different distances. Check it by ear.",
              offset_ms, ppm);
+  } else if (!r->drift_measured && r->matched_span_seconds >= 0.5 * duration) {
+    snprintf(buffer, sizeof(buffer),
+             "Offset %.2f ms, from %d of %d matching sounds. This recording is too short to measure drift, and "
+             "drift makes little difference at this length, so %s.",
+             offset_ms, r->anchors_used, r->anchors_usable,
+             have_prior ? "that value comes from capture timestamps" : "it is assumed to be zero");
   } else if (!r->drift_measured) {
     snprintf(buffer, sizeof(buffer),
              "Offset %.2f ms. Matches covered too little of the recording to measure drift, so %s. Clap near the "
@@ -695,7 +702,11 @@ SyncResult align_tracks(const AudioView& ref, const AudioView& other, const Time
       best.drift_measured = true;
     }
   }
-  set_message(&best, prior != nullptr);
+  if (prior) {
+    best.has_timestamps = true;
+    best.timestamps = *prior;
+  }
+  set_message(&best, prior != nullptr, ref.seconds());
   report(1.0f);
   return best;
 }

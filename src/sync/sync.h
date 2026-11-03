@@ -64,6 +64,9 @@ struct SyncResult {
   int anchors_used = 0;
   int anchors_usable = 0;
   double residual_rms_ms = 0.0;
+  double matched_span_seconds = 0.0;  // Time between the first and last matches used.
+  bool has_timestamps = false;        // Capture timestamps gave a first estimate.
+  TimeMap timestamps;
   std::vector<SyncAnchor> anchors;
   std::string message;          // Plain-language explanation for the user.
 };
