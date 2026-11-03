@@ -22,6 +22,7 @@
 #include "app/playback.h"
 #include "audio/capture.h"
 #include "audio/edits.h"
+#include "audio/import.h"
 #include "audio/recorder.h"
 #include "audio/session.h"
 #include "sync/export.h"
@@ -193,6 +194,10 @@ struct App {
   std::mutex dialog_mutex;
   std::string dialog_record_dir;
   std::string dialog_session_dir;
+  std::vector<std::string> dialog_import_files;
+
+  std::vector<std::string> dropped_files;
+  fs::path job_imported_session;  // Set by the import job, guarded by job_mutex.
 
   int tab_request = 0;  // 1 selects Record, 2 selects Edit.
   bool edit_tab_was_open = false;
@@ -537,6 +542,46 @@ void start_export_job(App& app) {
   });
 }
 
+// Pulls the audio out of existing video and audio files into a new session.
+void start_import_job(App& app, const std::vector<std::string>& files) {
+  if (app.job_running.load() || app.recorder.recording() || files.empty()) return;
+  finish_job(app);
+  std::vector<fs::path> inputs;
+  for (const std::string& file : files) inputs.push_back(fs::u8path(file));
+  app.playback.pause();
+  app.job_running.store(true);
+  app.job_progress.store(0.0f);
+  app.job_label = "Importing";
+  app.job_message.clear();
+  app.job_failed = false;
+  app.tab_request = 2;
+  const fs::path base_dir = fs::u8path(app.base_dir);
+  app.job_thread = std::thread([&app, inputs, base_dir] {
+    fs::path session;
+    std::string err;
+    const bool ok = import_files(inputs, base_dir, &session, &app.job_progress, &err);
+    std::lock_guard<std::mutex> lock(app.job_mutex);
+    app.job_failed = !ok;
+    app.job_message = ok ? std::string() : err;
+    app.job_imported_session = ok ? session : fs::path();
+    app.job_running.store(false);
+  });
+}
+
+// Once an import finishes, opens it and aligns straight away, since that's why it was imported.
+void collect_import_result(App& app) {
+  fs::path session;
+  {
+    std::lock_guard<std::mutex> lock(app.job_mutex);
+    if (app.job_running.load() || app.job_imported_session.empty()) return;
+    session = app.job_imported_session;
+    app.job_imported_session.clear();
+  }
+  load_session_into_editor(app, session);
+  app.match_master = true;
+  start_sync_job(app);
+}
+
 // Sets each track's gain so its loudest moment inside the trim range reaches the
 // target. Only the gain changes, so this is undoable and the WAVs stay as they are.
 void normalize_all(App& app) {
@@ -580,6 +625,22 @@ void SDLCALL on_record_folder(void* user, const char* const* files, int) {
   if (!files || !files[0]) return;
   std::lock_guard<std::mutex> lock(app.dialog_mutex);
   app.dialog_record_dir = files[0];
+}
+
+void SDLCALL on_import_files(void* user, const char* const* files, int) {
+  App& app = *static_cast<App*>(user);
+  if (!files) return;
+  std::lock_guard<std::mutex> lock(app.dialog_mutex);
+  app.dialog_import_files.clear();
+  for (int i = 0; files[i]; i++) app.dialog_import_files.push_back(files[i]);
+}
+
+void show_import_dialog(App& app) {
+  static const SDL_DialogFileFilter kFilters[] = {
+      {"Video and audio", "mp4;mov;m4v;mkv;webm;avi;mts;m2ts;wmv;wav;mp3;m4a;aac;flac;ogg;opus;aif;aiff"},
+      {"All files", "*"},
+  };
+  SDL_ShowOpenFileDialog(on_import_files, &app, app.window, kFilters, 2, nullptr, true);
 }
 
 void SDLCALL on_session_folder(void* user, const char* const* files, int) {
@@ -1009,6 +1070,13 @@ void draw_edit_tab(App& app) {
     SDL_ShowOpenFolderDialog(on_session_folder, &app, app.window, app.base_dir.c_str(), false);
   }
   tip("Open a folder of recordings made earlier. Any edits you made to it come back too.");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(app.job_running.load());
+  if (ImGui::Button("Import files...")) show_import_dialog(app);
+  ImGui::EndDisabled();
+  tip("Line up video and audio files you already have, for example a phone video and a separate microphone. The audio "
+      "is copied out into a new session, and the first video becomes the master. Your files are not changed. This "
+      "needs ffmpeg installed. You can also drag files onto this window.");
   if (!app.session.dir.empty()) {
     ImGui::SameLine();
     ImGui::BeginDisabled(app.undo_stack.empty());
@@ -1031,7 +1099,15 @@ void draw_edit_tab(App& app) {
   if (!app.edit_error.empty()) ImGui::TextColored(kRed, "%s", app.edit_error.c_str());
   if (app.tracks.empty()) {
     ImGui::Spacing();
-    ImGui::TextColored(kMuted, "Record something, or open a folder of recordings.");
+    if (app.job_running.load()) {
+      ImGui::ProgressBar(app.job_progress.load(), ImVec2(240.0f * ImGui::GetStyle().FontScaleDpi, 0.0f), app.job_label.c_str());
+    } else if (!app.job_message.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, app.job_failed ? kRed : kGreen);
+      ImGui::TextWrapped("%s", app.job_message.c_str());
+      ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
+    ImGui::TextColored(kMuted, "Record something, open a folder of recordings, or drag video and audio files here.");
     return;
   }
 
@@ -1352,7 +1428,26 @@ void apply_dialog_results(App& app) {
   }
   if (!app.dialog_session_dir.empty()) {
     load_session_into_editor(app, fs::u8path(app.dialog_session_dir));
+    app.tab_request = 2;
     app.dialog_session_dir.clear();
+  }
+  if (!app.dialog_import_files.empty()) {
+    start_import_job(app, app.dialog_import_files);
+    app.dialog_import_files.clear();
+  }
+}
+
+// A dropped folder opens as a session. Dropped files are imported together.
+void apply_dropped_files(App& app) {
+  std::vector<std::string> files;
+  files.swap(app.dropped_files);
+  if (files.empty() || app.recorder.recording()) return;
+  std::error_code ec;
+  if (files.size() == 1 && fs::is_directory(fs::u8path(files[0]), ec)) {
+    load_session_into_editor(app, fs::u8path(files[0]));
+    app.tab_request = 2;
+  } else {
+    start_import_job(app, files);
   }
 }
 
@@ -1442,11 +1537,14 @@ bool save_screenshot(SDL_Renderer* renderer, const char* path) {
 }  // namespace
 
 // Optional flags for automated checks: --open DIR, --align, --arm-all, --tab edit,
+// --import FILE (repeatable), --out DIR,
 // --script IN.txt OUT.txt, --screenshot FILE.bmp (saves after --frames N frames or
 // when the script ends, then exits).
 int main(int argc, char** argv) {
   const char* open_dir = nullptr;
   const char* screenshot_path = nullptr;
+  const char* base_dir_override = nullptr;
+  std::vector<std::string> import_paths;
   UiScript script;
   bool auto_align = false;
   bool arm_all = false;
@@ -1462,6 +1560,10 @@ int main(int argc, char** argv) {
     } else if (!strcmp(argv[i], "--script") && i + 2 < argc) {
       script.input = fopen(argv[++i], "r");
       script.output = fopen(argv[++i], "w");
+    } else if (!strcmp(argv[i], "--import") && i + 1 < argc) {
+      import_paths.push_back(argv[++i]);
+    } else if (!strcmp(argv[i], "--out") && i + 1 < argc) {
+      base_dir_override = argv[++i];
     } else if (!strcmp(argv[i], "--align")) {
       auto_align = true;
     } else if (!strcmp(argv[i], "--arm-all")) {
@@ -1522,6 +1624,7 @@ int main(int argc, char** argv) {
   app.window = window;
   const char* music = SDL_GetUserFolder(SDL_FOLDER_MUSIC);
   app.base_dir = (fs::u8path(music ? music : ".") / "MyDAW Recordings").u8string();
+  if (base_dir_override) app.base_dir = base_dir_override;
   refresh_devices(app);
   if (arm_all) {
     for (const auto& device : app.devices) {
@@ -1530,6 +1633,7 @@ int main(int argc, char** argv) {
     }
   }
   if (open_dir) load_session_into_editor(app, fs::u8path(open_dir));
+  start_import_job(app, import_paths);
   if (auto_align) start_sync_job(app);
   if (start_on_edit || open_dir) app.tab_request = 2;
 
@@ -1543,6 +1647,8 @@ int main(int argc, char** argv) {
       do {
         ImGui_ImplSDL3_ProcessEvent(&event);
         if (event.type == SDL_EVENT_QUIT) running = false;
+        if (event.type == SDL_EVENT_DROP_FILE && event.drop.data) app.dropped_files.push_back(event.drop.data);
+        if (event.type == SDL_EVENT_DROP_COMPLETE) apply_dropped_files(app);
         if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(window)) {
           running = false;
         }
@@ -1550,6 +1656,7 @@ int main(int argc, char** argv) {
     }
 
     apply_dialog_results(app);
+    collect_import_result(app);
     app.status = app.recorder.status();  // Reads and resets the meters, so call it once per frame.
 
     bool script_done = false;

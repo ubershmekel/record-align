@@ -69,6 +69,7 @@ target_compile_definitions(pffft_lib PUBLIC PFFFT_STATIC_DEFINE PRIVATE _USE_MAT
 add_library(mydaw_core STATIC
   src/audio/capture_wasapi.cpp
   src/audio/edits.cpp
+  src/audio/import.cpp
   src/audio/recorder.cpp
   src/audio/session.cpp
   src/audio/wav.cpp
@@ -98,6 +99,7 @@ endif()
 enable_testing()
 add_executable(mydaw-tests
   tests/test_edits.cpp
+  tests/test_import.cpp
   tests/test_main.cpp
   tests/test_recorder.cpp
   tests/test_soak.cpp
