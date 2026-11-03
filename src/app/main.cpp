@@ -131,13 +131,14 @@ struct TrackEditState {
 
 struct EditState {
   std::vector<TrackEditState> tracks;
+  size_t master = 0;  // The track the others align to. Its own timing stays at zero.
   bool in_set = false;
   bool out_set = false;
   double in_point = 0.0;
   double out_point = 0.0;
 
   bool operator==(const EditState& o) const {
-    return tracks == o.tracks && in_set == o.in_set && out_set == o.out_set &&
+    return tracks == o.tracks && master == o.master && in_set == o.in_set && out_set == o.out_set &&
            (!in_set || in_point == o.in_point) && (!out_set || out_point == o.out_point);
   }
   bool operator!=(const EditState& o) const { return !(*this == o); }
@@ -186,6 +187,7 @@ struct App {
   std::vector<std::pair<size_t, SyncResult>> job_sync_results;
   bool job_sync_done = false;
   bool write_mix = false;
+  bool match_master = false;  // Export exactly the master's span, to drop onto a video.
 
   // Folder dialogs may answer from another thread.
   std::mutex dialog_mutex;
@@ -287,6 +289,7 @@ void close_session(App& app) {
 
 void save_session_edits(App& app) {
   SessionEdits saved;
+  saved.master_name = app.session.tracks[app.edit.master].name;
   saved.in_set = app.edit.in_set;
   saved.out_set = app.edit.out_set;
   saved.in_seconds = app.edit.in_point;
@@ -316,6 +319,9 @@ void load_session_edits(App& app) {
   app.edit.out_set = saved.out_set;
   app.edit.in_point = saved.in_seconds;
   app.edit.out_point = saved.out_seconds;
+  for (size_t i = 0; i < app.session.tracks.size(); i++) {
+    if (app.session.tracks[i].name == saved.master_name) app.edit.master = i;
+  }
   for (const TrackEdit& t : saved.tracks) {
     for (size_t i = 0; i < app.session.tracks.size(); i++) {
       if (app.session.tracks[i].name != t.name) continue;
@@ -363,6 +369,7 @@ void redo_edit(App& app) {
 
 // Names the difference between two states, for the undo and redo tooltips.
 std::string describe_change(const EditState& a, const EditState& b) {
+  if (a.master != b.master) return "master track change";
   if (a.in_set != b.in_set || a.out_set != b.out_set || (a.in_set && a.in_point != b.in_point) ||
       (a.out_set && a.out_point != b.out_point)) {
     return "trim";
@@ -433,11 +440,13 @@ void start_sync_job(App& app) {
   app.job_label = "Aligning tracks";
   app.job_message.clear();
   app.job_failed = false;
-  app.job_thread = std::thread([&app] {
-    const SessionTrack& ref = app.session.tracks[0];
+  const size_t master = app.edit.master;
+  app.job_thread = std::thread([&app, master] {
+    const SessionTrack& ref = app.session.tracks[master];
     const ClockFit ref_clock = fit_clock(ref.timing, ref.wav->sample_rate());
     std::vector<std::pair<size_t, SyncResult>> results;
-    for (size_t i = 1; i < app.session.tracks.size(); i++) {
+    for (size_t i = 0; i < app.session.tracks.size(); i++) {
+      if (i == master) continue;
       const SessionTrack& t = app.session.tracks[i];
       TimeMap prior;
       const bool has_prior = time_map_from_clocks(ref_clock, fit_clock(t.timing, t.wav->sample_rate()), &prior);
@@ -449,6 +458,18 @@ void start_sync_job(App& app) {
     app.job_sync_done = true;
     app.job_running.store(false);
   });
+}
+
+// Timing is relative to the master, so changing it means measuring everything again.
+void set_master(App& app, size_t index) {
+  if (app.job_running.load() || index == app.edit.master) return;
+  app.edit.master = index;
+  for (TrackEditState& e : app.edit.tracks) {
+    e.offset_ms = 0.0f;
+    e.drift_ppm = 0.0f;
+    e.sync = nullptr;
+  }
+  start_sync_job(app);
 }
 
 void collect_sync_results(App& app) {
@@ -488,11 +509,17 @@ void start_export_job(App& app) {
     jobs.push_back(std::move(e));
   }
   ExportOptions options;
+  const WavFile& master_wav = *app.session.tracks[app.edit.master].wav;
   options.out_dir = app.session.dir / "aligned";
-  options.sample_rate = app.session.tracks[0].wav->sample_rate();
+  options.sample_rate = master_wav.sample_rate();
   options.use_range = app.edit.in_set || app.edit.out_set;
   options.range_start = effective_in(app);
   options.range_end = effective_out(app);
+  if (app.match_master && !options.use_range) {
+    options.use_range = true;
+    options.range_start = 0.0;
+    options.range_end = master_wav.seconds();
+  }
   options.write_mix = app.write_mix;
 
   app.job_running.store(true);
@@ -880,10 +907,10 @@ void draw_alignment_report(App& app) {
 
   static const char* const kHeaders[] = {"Track", "Confidence", "Offset", "Drift", "Drift over recording", "Matches", "Spread", "Timestamps said"};
   static const char* const kHeaderTips[] = {
-      "Each track is compared with the reference track.",
+      "Each track is compared with the master track.",
       "How much to trust this result. Hover over a track's label for the explanation.",
-      "How far into this track the reference track's first moment falls. Positive means this microphone started first.",
-      "How much faster this microphone's clock runs than the reference, in parts per million.",
+      "How far into this track the master track's first moment falls. Positive means this microphone started first.",
+      "How much faster this microphone's clock runs than the master, in parts per million.",
       "How far the two tracks would slide apart by the end of this recording without correction.",
       "Sharp sounds found in both tracks and used for the fit, out of all that were strong enough to consider.",
       "How far apart the strongest matches landed. Zero to 1 ms is tight. Several ms suggests echoes, effects on the "
@@ -1024,7 +1051,7 @@ void draw_edit_tab(App& app) {
   ImGui::SameLine();
   ImGui::AlignTextToFramePadding();
   ImGui::Text("%s", format_time_precise(app.playback.position()).c_str());
-  tip("Playhead position, in minutes and seconds. It can be slightly negative when a track started before the reference track.");
+  tip("Playhead position, in minutes and seconds. It can be slightly negative when a track started before the master track.");
   ImGui::SameLine(0.0f, 24.0f * scale);
   if (ImGui::Button("Set in")) {
     app.edit.in_set = true;
@@ -1088,7 +1115,7 @@ void draw_edit_tab(App& app) {
   ImGui::BeginDisabled(busy || app.tracks.size() < 2);
   if (ImGui::Button("Align tracks")) start_sync_job(app);
   tip("Finds sounds that appear on several tracks, like your claps, and works out how each track lines up with the "
-      "reference track. This only saves timing numbers. Your WAV files are not changed.");
+      "master track. This only saves timing numbers. Your WAV files are not changed.");
   ImGui::EndDisabled();
   ImGui::SameLine();
   ImGui::Checkbox("Hear aligned", &app.aligned);
@@ -1108,8 +1135,12 @@ void draw_edit_tab(App& app) {
       "same moment. Drop them in any editor at time zero and they line up. Includes your gain and trim.");
   ImGui::EndDisabled();
   ImGui::SameLine();
-  ImGui::Checkbox("Also export a stereo mix", &app.write_mix);
+  ImGui::Checkbox("Stereo mix", &app.write_mix);
   tip("Also writes mix.wav, combining the tracks you can currently hear. It's scaled down if it would otherwise clip.");
+  ImGui::SameLine();
+  ImGui::Checkbox("Match master's length", &app.match_master);
+  tip("Makes every exported file start and end exactly with the master track, cutting anything outside it. Use this "
+      "to lay audio under a video: put the video and the files at time zero. In and out points take priority.");
   if (busy) {
     ImGui::SameLine();
     ImGui::ProgressBar(app.job_progress.load(), ImVec2(160.0f * scale, 0.0f), app.job_label.c_str());
@@ -1198,13 +1229,14 @@ void draw_edit_tab(App& app) {
       if (ImGui::MenuItem("Reset gain to 0 dB")) e.gain_db = 0.0f;
       ImGui::EndPopup();
     }
-    if (i == 0) {
-      ImGui::TextColored(kMuted, "Reference track");
-      tip("The track everything else lines up with. It stays exactly as recorded.");
+    if (i == app.edit.master) {
+      ImGui::TextColored(kGreen, "Master track");
+      tip("The track everything else lines up with. Its timing is never changed. Choose a video's own audio here if "
+          "you're laying these tracks under that video.");
     } else {
       ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
       ImGui::DragFloat("ms##offset", &e.offset_ms, 0.1f, 0.0f, 0.0f, "%.2f");
-      tip("Offset, in milliseconds: how far into this track the reference track's first moment falls. Positive means "
+      tip("Offset, in milliseconds: how far into this track the master track's first moment falls. Positive means "
           "this microphone started first. Drag to nudge, double-click to type, right-click to reset.");
       if (ImGui::BeginPopupContextItem("offset_menu")) {
         if (e.sync) {
@@ -1219,7 +1251,7 @@ void draw_edit_tab(App& app) {
       ImGui::SameLine();
       ImGui::SetNextItemWidth(-40.0f * scale);
       ImGui::DragFloat("ppm##drift", &e.drift_ppm, 0.1f, -500.0f, 500.0f, "%.2f");
-      tip("Drift, in parts per million: how much faster this microphone's clock runs than the reference. 1 ppm adds "
+      tip("Drift, in parts per million: how much faster this microphone's clock runs than the master. 1 ppm adds "
           "up to 3.6 ms per hour, and 100 ppm to 360 ms per hour. Drag to nudge, double-click to type, right-click to "
           "reset.");
       if (ImGui::BeginPopupContextItem("drift_menu")) {
@@ -1243,7 +1275,12 @@ void draw_edit_tab(App& app) {
                              e.sync->anchors_used, e.sync->anchors_usable);
           ImGui::EndTooltip();
         }
+        ImGui::SameLine();
       }
+      ImGui::BeginDisabled(busy);
+      if (ImGui::SmallButton("Make master")) set_master(app, i);
+      tip("Line every other track up with this one instead. This aligns the tracks again.");
+      ImGui::EndDisabled();
     }
     if (st.gap_frames > 0 || st.dropped_frames > 0) {
       ImGui::TextColored(kAmber, "%.2f s of silence was inserted",

@@ -37,6 +37,7 @@ bool save_edits(const fs::path& session_dir, const SessionEdits& edits, std::str
     return false;
   }
   fprintf(f, "%s\n", kHeader);
+  if (!edits.master_name.empty()) fprintf(f, "master %s\n", edits.master_name.c_str());
   if (edits.in_set) fprintf(f, "in %.17g\n", edits.in_seconds);
   if (edits.out_set) fprintf(f, "out %.17g\n", edits.out_seconds);
   for (const TrackEdit& t : edits.tracks) {
@@ -81,7 +82,9 @@ bool load_edits(const fs::path& session_dir, SessionEdits* out) {
   while (fgets(line, sizeof(line), f)) {
     double value = 0.0;
     int flag = 0;
-    if (sscanf(line, "in %lf", &value) == 1) {
+    if (starts_with(line, "master ")) {
+      out->master_name = rest_of_line(line, strlen("master "));
+    } else if (sscanf(line, "in %lf", &value) == 1) {
       out->in_set = true;
       out->in_seconds = value;
     } else if (sscanf(line, "out %lf", &value) == 1) {

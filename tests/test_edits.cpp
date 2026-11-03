@@ -27,6 +27,7 @@ struct TempDir {
 TEST_CASE("edits survive a save and load exactly") {
   TempDir dir("edits_roundtrip");
   SessionEdits edits;
+  edits.master_name = "02_Mic";
   edits.in_set = true;
   edits.in_seconds = 1.25;
   TrackEdit plain;
@@ -67,6 +68,7 @@ TEST_CASE("edits survive a save and load exactly") {
 
   SessionEdits loaded;
   REQUIRE(load_edits(dir.path, &loaded));
+  CHECK(loaded.master_name == "02_Mic");
   CHECK(loaded.in_set);
   CHECK(loaded.in_seconds == 1.25);
   CHECK_FALSE(loaded.out_set);

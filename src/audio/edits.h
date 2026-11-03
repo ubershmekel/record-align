@@ -21,6 +21,7 @@ struct TrackEdit {
 
 struct SessionEdits {
   std::vector<TrackEdit> tracks;
+  std::string master_name;  // The track the others align to. Empty means the first.
   bool in_set = false;
   bool out_set = false;
   double in_seconds = 0.0;
