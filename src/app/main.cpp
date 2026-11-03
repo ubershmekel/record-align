@@ -579,12 +579,38 @@ void draw_meter(float level, float hold, const ImVec2& size) {
   draw->AddLine(ImVec2(hx, p.y), ImVec2(hx, p.y + size.y), IM_COL32(235, 235, 235, 220), 1.5f);
 }
 
+// Explains the claps, and turns into a prompt for what to do during a recording.
+void draw_clap_guide(App& app, bool recording) {
+  constexpr double kStartPromptSeconds = 30.0;
+  ImGui::BeginChild("clap_guide", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+  if (recording) {
+    if (app.recorder.elapsed_seconds() < kStartPromptSeconds) {
+      ImGui::TextColored(kAmber, "Clap 3 times now, with a short gap between claps, close enough for every microphone to hear.");
+    } else {
+      ImGui::TextColored(kMuted, "When you're done, clap 3 more times, then press Stop recording.");
+    }
+  } else {
+    ImGui::TextUnformatted("Clap 3 times at the start of each recording, and 3 times at the end.");
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kMuted,
+                       "Every microphone runs on its own clock, so they start at slightly different moments and can "
+                       "slowly slide apart. Claps give them all the same sharp sounds to match. The first claps line "
+                       "up the start, and the last claps measure any sliding, so the tracks stay together all the way "
+                       "through.");
+    ImGui::PopTextWrapPos();
+  }
+  ImGui::EndChild();
+}
+
 void draw_record_tab(App& app) {
   const bool recording = app.recorder.recording();
+
+  draw_clap_guide(app, recording);
 
   ImGui::SeparatorText("Microphones");
   ImGui::BeginDisabled(recording);
   if (ImGui::Button("Refresh list")) refresh_devices(app);
+  tip("Look for microphones again, for example after plugging one in.");
   ImGui::EndDisabled();
   if (!app.device_error.empty()) {
     ImGui::SameLine();
@@ -613,11 +639,13 @@ void draw_record_tab(App& app) {
           app.recorder.disarm(device.id);
         }
       }
+      tip("Tick to record from this microphone. Its meter goes live, but nothing is saved until you press Start recording.");
       ImGui::EndDisabled();
       ImGui::TableNextColumn();
       ImGui::AlignTextToFramePadding();
       ImGui::TextColored(kMuted, "%.1f kHz, %s", device.sample_rate / 1000.0,
                          device.channels == 1 ? "mono" : (device.channels == 2 ? "stereo" : "multi"));
+      tip("The format Windows provides for this microphone. It is recorded as is, without converting.");
       ImGui::TableNextColumn();
       const TrackStatus* status = nullptr;
       for (const auto& s : app.status) {
@@ -627,6 +655,8 @@ void draw_record_tab(App& app) {
         float& hold = app.meter_hold[i];
         hold = std::max(status->peak, hold * 0.97f);
         draw_meter(status->peak, hold, ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetFrameHeight()));
+        tip("Live level, from -60 dB on the left to 0 dB on the right. The white line holds the recent peak. Red means "
+            "the sound is too loud and is distorting.");
       }
       ImGui::PopID();
     }
@@ -639,6 +669,7 @@ void draw_record_tab(App& app) {
   if (ImGui::Button("Choose folder...")) {
     SDL_ShowOpenFolderDialog(on_record_folder, &app, app.window, app.base_dir.c_str(), false);
   }
+  tip("Where recordings go. Each recording gets its own new folder inside this one.");
   ImGui::EndDisabled();
   ImGui::SameLine();
   ImGui::TextUnformatted(app.base_dir.c_str());
@@ -673,6 +704,7 @@ void draw_record_tab(App& app) {
       std::string err;
       if (!app.recorder.start(fs::u8path(app.base_dir), &err)) app.record_error = err;
     }
+    tip("Records every ticked microphone to its own WAV file.");
     ImGui::EndDisabled();
     ImGui::PopStyleColor(3);
     if (app.status.empty()) {
@@ -692,10 +724,6 @@ void draw_record_tab(App& app) {
     ImGui::EndGroup();
   }
 
-  if (recording) {
-    ImGui::TextColored(kMuted, "For the best sync, clap three times near all the microphones now, and again before stopping.");
-  }
-
   if (!app.status.empty() && (recording || !app.last_session.empty())) {
     ImGui::Spacing();
     if (ImGui::BeginTable("tracks", 5, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerH)) {
@@ -704,7 +732,20 @@ void draw_record_tab(App& app) {
       ImGui::TableSetupColumn("Gaps", ImGuiTableColumnFlags_WidthFixed);
       ImGui::TableSetupColumn("Lost", ImGuiTableColumnFlags_WidthFixed);
       ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthStretch, 3.0f);
-      ImGui::TableHeadersRow();
+      static const char* const kHeaders[] = {"Track", "Length", "Gaps", "Lost", "State"};
+      static const char* const kTips[] = {
+          "The microphone this file comes from.",
+          "How much has been saved so far.",
+          "Time the device skipped. It's filled with silence so the track's timing stays correct.",
+          "Audio lost because the disk couldn't keep up. It's filled with silence so the track's timing stays correct.",
+          "Whether this track is recording, saved, or has a problem.",
+      };
+      ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+      for (int c = 0; c < 5; c++) {
+        ImGui::TableSetColumnIndex(c);
+        ImGui::TableHeader(kHeaders[c]);
+        tip(kTips[c]);
+      }
       for (const auto& s : app.status) {
         const double rate = std::max(1, s.sample_rate);
         ImGui::TableNextRow();
@@ -939,6 +980,7 @@ void draw_edit_tab(App& app) {
   if (ImGui::Button("Open session folder...")) {
     SDL_ShowOpenFolderDialog(on_session_folder, &app, app.window, app.base_dir.c_str(), false);
   }
+  tip("Open a folder of recordings made earlier. Any edits you made to it come back too.");
   if (!app.session.dir.empty()) {
     ImGui::SameLine();
     ImGui::BeginDisabled(app.undo_stack.empty());
@@ -973,17 +1015,22 @@ void draw_edit_tab(App& app) {
   const bool recording = app.recorder.recording();
   ImGui::BeginDisabled(recording);
   if (ImGui::Button(app.playback.playing() ? "Pause" : "Play", ImVec2(70.0f * scale, 0.0f))) toggle_playback(app);
+  tip("Play or pause all tracks together (Space).");
   ImGui::EndDisabled();
   ImGui::SameLine();
   if (ImGui::Button("Back to start")) app.playback.seek(effective_in(app));
+  tip("Move the playhead to the start, or to the in point if one is set.");
   ImGui::SameLine();
   ImGui::AlignTextToFramePadding();
   ImGui::Text("%s", format_time_precise(app.playback.position()).c_str());
+  tip("Playhead position, in minutes and seconds. It can be slightly negative when a track started before the reference track.");
   ImGui::SameLine(0.0f, 24.0f * scale);
   if (ImGui::Button("Set in")) {
     app.edit.in_set = true;
     app.edit.in_point = std::min(app.playback.position(), effective_out(app));
   }
+  tip("Export starts from the playhead, trimming off everything before it. Audio stays in your original files. "
+      "Right-click to clear.");
   if (ImGui::BeginPopupContextItem("in_menu")) {
     if (ImGui::MenuItem("Clear in point", nullptr, false, app.edit.in_set)) app.edit.in_set = false;
     ImGui::EndPopup();
@@ -993,6 +1040,8 @@ void draw_edit_tab(App& app) {
     app.edit.out_set = true;
     app.edit.out_point = std::max(app.playback.position(), effective_in(app));
   }
+  tip("Export ends at the playhead, trimming off everything after it. Audio stays in your original files. "
+      "Right-click to clear.");
   if (ImGui::BeginPopupContextItem("out_menu")) {
     if (ImGui::MenuItem("Clear out point", nullptr, false, app.edit.out_set)) app.edit.out_set = false;
     ImGui::EndPopup();
@@ -1007,6 +1056,7 @@ void draw_edit_tab(App& app) {
       app.edit.in_set = false;
       app.edit.out_set = false;
     }
+    tip("Remove both the in point and the out point, so export covers the whole recording.");
   } else {
     ImGui::TextColored(kMuted, "No trim");
   }
@@ -1016,38 +1066,49 @@ void draw_edit_tab(App& app) {
     app.view_seconds = std::max(0.05, app.view_seconds * 0.5);
     app.view_start = center - app.view_seconds * 0.5;
   }
+  tip("Show less time, in more detail. You can also scroll over a waveform.");
   ImGui::SameLine();
   if (ImGui::Button("Zoom out")) {
     double center = app.view_start + app.view_seconds * 0.5;
     app.view_seconds = std::min(app.timeline_end - app.timeline_start, app.view_seconds * 2.0);
     app.view_start = center - app.view_seconds * 0.5;
   }
+  tip("Show more time, in less detail.");
   ImGui::SameLine();
   if (ImGui::Button("Fit")) {
     app.view_start = app.timeline_start;
     app.view_seconds = app.timeline_end - app.timeline_start;
   }
+  tip("Show the whole recording.");
   app.view_start = std::max(app.timeline_start, std::min(app.view_start, app.timeline_end - app.view_seconds));
 
   // Sync and export
   ImGui::Spacing();
   ImGui::BeginDisabled(busy || app.tracks.size() < 2);
   if (ImGui::Button("Align tracks")) start_sync_job(app);
+  tip("Finds sounds that appear on several tracks, like your claps, and works out how each track lines up with the "
+      "reference track. This only saves timing numbers. Your WAV files are not changed.");
   ImGui::EndDisabled();
   ImGui::SameLine();
   ImGui::Checkbox("Hear aligned", &app.aligned);
+  tip("Turn this off to see and hear the tracks as they were recorded, for comparison.");
   ImGui::SameLine(0.0f, 24.0f * scale);
   bool peaks_ready = true;
   for (const auto& t : app.tracks) peaks_ready = peaks_ready && t->peaks_ready.load();
   ImGui::BeginDisabled(busy || !peaks_ready);
   if (ImGui::Button("Normalize all")) normalize_all(app);
+  tip("Sets each track's gain so its loudest moment reaches -1 dB. Claps are often the loudest thing, so to bring up "
+      "speech, set the in and out points past the claps first. Your WAV files are not changed.");
   ImGui::EndDisabled();
   ImGui::SameLine(0.0f, 24.0f * scale);
   ImGui::BeginDisabled(busy);
   if (ImGui::Button("Export aligned WAVs")) start_export_job(app);
+  tip("Writes one new WAV per track into an \"aligned\" folder in the session, all the same length and starting at the "
+      "same moment. Drop them in any editor at time zero and they line up. Includes your gain and trim.");
   ImGui::EndDisabled();
   ImGui::SameLine();
   ImGui::Checkbox("Also export a stereo mix", &app.write_mix);
+  tip("Also writes mix.wav, combining the tracks you can currently hear. It's scaled down if it would otherwise clip.");
   if (busy) {
     ImGui::SameLine();
     ImGui::ProgressBar(app.job_progress.load(), ImVec2(160.0f * scale, 0.0f), app.job_label.c_str());
@@ -1103,7 +1164,7 @@ void draw_edit_tab(App& app) {
     ImGui::BeginChild("controls", ImVec2(panel_width, lane_height), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_NoScrollbar);
     ImGui::TextUnformatted(st.name.c_str());
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", st.wav_path.u8string().c_str());
+    tip((st.wav_path.u8string() + "\n\nRight-click to reset this track.").c_str());
     if (ImGui::BeginPopupContextItem("track_menu")) {
       if (ImGui::MenuItem("Reset this track")) {
         e.gain_db = 0.0f;
@@ -1118,22 +1179,29 @@ void draw_edit_tab(App& app) {
     ImGui::PushStyleColor(ImGuiCol_Button, e.mute ? ImVec4(0.72f, 0.42f, 0.14f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
     if (ImGui::SmallButton("Mute")) e.mute = !e.mute;
     ImGui::PopStyleColor();
+    tip("Silence this track. It's also left out of the stereo mix, but still gets its own exported file.");
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, solo ? ImVec4(0.20f, 0.55f, 0.30f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
     if (ImGui::SmallButton("Solo")) click_solo(app, i);
     ImGui::PopStyleColor();
+    tip("Hear only this track. Click again to hear everything. Shift-click or Ctrl-click to add another track.");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::SliderFloat("##gain", &e.gain_db, -40.0f, 40.0f, "%.1f dB");
+    tip("Volume in decibels. 0 dB leaves it unchanged, and +6 dB is about twice the signal level. Applies to playback "
+        "and export. Double-click to type a value, right-click to reset.");
     if (ImGui::BeginPopupContextItem("gain_menu")) {
       if (ImGui::MenuItem("Reset gain to 0 dB")) e.gain_db = 0.0f;
       ImGui::EndPopup();
     }
     if (i == 0) {
       ImGui::TextColored(kMuted, "Reference track");
+      tip("The track everything else lines up with. It stays exactly as recorded.");
     } else {
       ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
       ImGui::DragFloat("ms##offset", &e.offset_ms, 0.1f, 0.0f, 0.0f, "%.2f");
+      tip("Offset, in milliseconds: how far into this track the reference track's first moment falls. Positive means "
+          "this microphone started first. Drag to nudge, double-click to type, right-click to reset.");
       if (ImGui::BeginPopupContextItem("offset_menu")) {
         if (e.sync) {
           const float aligned_ms = float(e.sync->map.offset_seconds * 1000.0);
@@ -1147,6 +1215,9 @@ void draw_edit_tab(App& app) {
       ImGui::SameLine();
       ImGui::SetNextItemWidth(-40.0f * scale);
       ImGui::DragFloat("ppm##drift", &e.drift_ppm, 0.1f, -500.0f, 500.0f, "%.2f");
+      tip("Drift, in parts per million: how much faster this microphone's clock runs than the reference. 1 ppm adds "
+          "up to 3.6 ms per hour, and 100 ppm to 360 ms per hour. Drag to nudge, double-click to type, right-click to "
+          "reset.");
       if (ImGui::BeginPopupContextItem("drift_menu")) {
         if (e.sync) {
           const float aligned_ppm = float(e.sync->map.drift * 1e6);
