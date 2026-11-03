@@ -1,0 +1,55 @@
+# Pushing a tag like v0.1.0 builds, tests and publishes a GitHub release.
+# Pull requests and pushes to main only build and test.
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release --parallel
+
+      - name: Install ffmpeg for the import tests
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Test
+        run: build\Release\mydaw-tests.exe
+
+      - name: Package
+        shell: pwsh
+        run: ./package.ps1 -Version "${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --generate-notes
