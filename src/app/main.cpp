@@ -1057,11 +1057,11 @@ void draw_channel_waveform(const WavFile& wav,
                             int ch_idx, double offset, double drift,
                             const ImVec2& p, const ImVec2& size,
                             double view_start, double view_seconds,
-                            ImDrawList* draw, ImU32 color) {
+                            ImDrawList* draw, ImU32 color, float gain_scale = 1.0f) {
   const double rate = wav.sample_rate();
   const int ch = wav.channels();
   const float mid = p.y + size.y * 0.5f;
-  const float amp = size.y * 0.48f;
+  const float amp = size.y * 0.48f * gain_scale;
   const int columns = int(size.x);
   for (int x = 0; x < columns; x++) {
     const double t0 = view_start + view_seconds * x / columns;
@@ -1112,7 +1112,7 @@ void draw_channel_waveform(const WavFile& wav,
 }
 
 // Draws the waveform for a track. Stereo tracks are split: L on top half, R on bottom half.
-void draw_waveform(const EditTrack& t, const ImVec2& p, const ImVec2& size, double view_start, double view_seconds,
+void draw_waveform(const EditTrack& t, float gain_db, const ImVec2& p, const ImVec2& size, double view_start, double view_seconds,
                    ImDrawList* draw, bool muted) {
   const WavFile& wav = *t.playback.wav;
   if (!t.peaks_ready.load()) {
@@ -1121,6 +1121,10 @@ void draw_waveform(const EditTrack& t, const ImVec2& p, const ImVec2& size, doub
   }
   const double offset = t.playback.offset_seconds.load();
   const double drift = t.playback.drift.load();
+  // Scale visible amplitude by gain: each 20 dB shifts height by 1×,
+  // so +20 dB fills the lane and -20 dB collapses to a sliver. The lane's
+  // clip rect handles overflow, so we don't cap the upper end tightly.
+  const float gain_scale = std::max(0.1f, 1.0f + gain_db / 20.0f);
   const ImU32 color_l = muted ? IM_COL32(95, 100, 110, 255) : IM_COL32(95, 170, 225, 255);
   const int ch = wav.channels();
   if (ch >= 2 && int(t.peaks.ch_minimum.size()) >= 2) {
@@ -1135,16 +1139,16 @@ void draw_waveform(const EditTrack& t, const ImVec2& p, const ImVec2& size, doub
     draw_channel_waveform(wav, t.peaks.ch_minimum[0], t.peaks.ch_maximum[0],
                           t.peaks.ch_coarse_minimum[0], t.peaks.ch_coarse_maximum[0],
                           0, offset, drift, p, ImVec2(size.x, half_h),
-                          view_start, view_seconds, draw, color_l);
+                          view_start, view_seconds, draw, color_l, gain_scale);
     draw_channel_waveform(wav, t.peaks.ch_minimum[1], t.peaks.ch_maximum[1],
                           t.peaks.ch_coarse_minimum[1], t.peaks.ch_coarse_maximum[1],
                           1, offset, drift, ImVec2(p.x, divider_y), ImVec2(size.x, size.y - half_h),
-                          view_start, view_seconds, draw, color_r);
+                          view_start, view_seconds, draw, color_r, gain_scale);
   } else {
     draw_channel_waveform(wav, t.peaks.minimum, t.peaks.maximum,
                           t.peaks.coarse_minimum, t.peaks.coarse_maximum,
                           -1, offset, drift, p, size,
-                          view_start, view_seconds, draw, color_l);
+                          view_start, view_seconds, draw, color_l, gain_scale);
   }
 }
 
@@ -1619,7 +1623,7 @@ void draw_edit_tab(App& app) {
     draw->AddRectFilled(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
                         IM_COL32(24, 26, 31, 255));
     const bool silent = e.mute || (any_solo && !t.playback.solo.load());
-    draw_waveform(t, canvas_pos, canvas_size, app.view_start, app.view_seconds, draw, silent);
+    draw_waveform(t, e.gain_db, canvas_pos, canvas_size, app.view_start, app.view_seconds, draw, silent);
     const SyncAnchor* hovered_anchor = nullptr;
     if (e.sync && app.aligned) {
       const ImVec2 mouse = ImGui::GetMousePos();

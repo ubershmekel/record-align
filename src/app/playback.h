@@ -33,7 +33,8 @@ class Playback {
   void play();
   void pause();
   bool playing() const { return playing_.load(); }
-  void seek(double seconds) { position_.store(seconds); }
+  // Seek to a new position. Safe to call from any thread.
+  void seek(double seconds);
   double position() const { return position_.load(); }
   void set_stop_at(double seconds) { stop_at_.store(seconds); }
 
@@ -47,4 +48,7 @@ class Playback {
   std::atomic<double> position_{0.0};
   std::atomic<double> stop_at_{0.0};
   std::atomic<bool> playing_{false};
+  // Set by seek(); render() applies it atomically so it never gets overwritten.
+  static constexpr double kNoSeek = -1e300;
+  std::atomic<double> pending_seek_{kNoSeek};
 };

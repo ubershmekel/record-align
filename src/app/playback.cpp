@@ -43,6 +43,14 @@ void Playback::play() { playing_.store(true); }
 
 void Playback::pause() { playing_.store(false); }
 
+void Playback::seek(double seconds) {
+  // Store the target for render() to pick up atomically at the top of its
+  // next batch. This avoids the race where render() would overwrite our
+  // position_.store with its own end-of-batch update.
+  pending_seek_.store(seconds);
+  if (stream_) SDL_ClearAudioStream(stream_);
+}
+
 void Playback::callback(void* user, SDL_AudioStream* stream, int additional, int) {
   auto* self = static_cast<Playback*>(user);
   while (additional > 0) {
@@ -57,6 +65,15 @@ void Playback::callback(void* user, SDL_AudioStream* stream, int additional, int
 
 void Playback::render(float* stereo, int frames) {
   std::fill(stereo, stereo + size_t(frames) * 2, 0.0f);
+
+  // Apply any pending seek before using position_, so seek() is never
+  // overwritten by our own end-of-batch position_.store.
+  double sought = pending_seek_.load();
+  if (sought != kNoSeek) {
+    if (pending_seek_.compare_exchange_strong(sought, kNoSeek))
+      position_.store(sought);
+  }
+
   if (!playing_.load()) return;
 
   bool any_solo = false;
