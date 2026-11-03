@@ -228,6 +228,34 @@ void sync_playback(App& app) {
 double effective_in(const App& app) { return app.edit.in_set ? app.edit.in_point : app.timeline_start; }
 double effective_out(const App& app) { return app.edit.out_set ? app.edit.out_point : app.timeline_end; }
 
+void toggle_playback(App& app) {
+  if (app.recorder.recording()) return;
+  if (app.playback.playing()) {
+    app.playback.pause();
+    return;
+  }
+  if (app.playback.position() >= app.timeline_end) app.playback.seek(effective_in(app));
+  app.playback.play();
+}
+
+// A plain click listens to just this track, and clicking the only soloed track
+// turns solo off. Holding Shift or Ctrl adds or removes tracks from the set.
+void click_solo(App& app, size_t index) {
+  const ImGuiIO& io = ImGui::GetIO();
+  std::atomic<bool>& clicked = app.tracks[index]->playback.solo;
+  if (io.KeyShift || io.KeyCtrl) {
+    clicked.store(!clicked.load());
+    return;
+  }
+  bool others = false;
+  for (size_t i = 0; i < app.tracks.size(); i++) {
+    if (i != index && app.tracks[i]->playback.solo.load()) others = true;
+  }
+  const bool turn_on = others || !clicked.load();
+  for (auto& t : app.tracks) t->playback.solo.store(false);
+  clicked.store(turn_on);
+}
+
 void close_session(App& app) {
   app.playback.set_tracks({});
   app.peak_cancel.store(true);
@@ -761,15 +789,7 @@ void draw_edit_tab(App& app) {
   ImGui::Spacing();
   const bool recording = app.recorder.recording();
   ImGui::BeginDisabled(recording);
-  const bool playing = app.playback.playing();
-  if (ImGui::Button(playing ? "Pause" : "Play", ImVec2(70.0f * scale, 0.0f))) {
-    if (playing) {
-      app.playback.pause();
-    } else {
-      if (app.playback.position() >= app.timeline_end) app.playback.seek(effective_in(app));
-      app.playback.play();
-    }
-  }
+  if (ImGui::Button(app.playback.playing() ? "Pause" : "Play", ImVec2(70.0f * scale, 0.0f))) toggle_playback(app);
   ImGui::EndDisabled();
   ImGui::SameLine();
   if (ImGui::Button("Back to start")) app.playback.seek(effective_in(app));
@@ -888,7 +908,7 @@ void draw_edit_tab(App& app) {
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, solo ? ImVec4(0.20f, 0.55f, 0.30f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
-    if (ImGui::SmallButton("Solo")) t.playback.solo.store(!solo);
+    if (ImGui::SmallButton("Solo")) click_solo(app, i);
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
@@ -1111,11 +1131,17 @@ int main(int argc, char** argv) {
         draw_record_tab(app);
         ImGui::EndTabItem();
       }
+      bool edit_tab_open = false;
       if (ImGui::BeginTabItem("Edit", nullptr, edit_flags)) {
+        edit_tab_open = true;
         draw_edit_tab(app);
         ImGui::EndTabItem();
       }
       ImGui::EndTabBar();
+      // Only on the Edit tab, so a stray key press can't touch a recording.
+      if (edit_tab_open && !app.tracks.empty() && !io.WantTextInput) {
+        if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Space, false)) toggle_playback(app);
+      }
     }
     if (!app.tracks.empty()) {
       commit_edits(app);
