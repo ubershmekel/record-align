@@ -499,6 +499,44 @@ void start_export_job(App& app) {
   });
 }
 
+// Sets each track's gain so its loudest moment inside the trim range reaches the
+// target. Only the gain changes, so this is undoable and the WAVs stay as they are.
+void normalize_all(App& app) {
+  constexpr float kTargetDb = -1.0f;
+  constexpr float kMaxGainDb = 40.0f;
+  constexpr float kSilence = 1e-5f;
+  const double start = effective_in(app);
+  const double end = effective_out(app);
+
+  std::string report = "Normalized to a -1 dB peak:";
+  for (size_t i = 0; i < app.tracks.size(); i++) {
+    const EditTrack& t = *app.tracks[i];
+    const double rate = t.playback.wav->sample_rate();
+    const double offset = t.playback.offset_seconds.load();
+    const double drift = t.playback.drift.load();
+    const double first = std::max(0.0, (offset + (1.0 + drift) * start) * rate);
+    const double last = std::max(0.0, (offset + (1.0 + drift) * end) * rate);
+    const size_t b0 = size_t(first / kPeakBucketFrames);
+    const size_t b1 = std::min(t.peaks.minimum.size(), size_t(last / kPeakBucketFrames) + 1);
+    float peak = 0.0f;
+    for (size_t b = b0; b < b1; b++) peak = std::max({peak, -t.peaks.minimum[b], t.peaks.maximum[b]});
+
+    char part[64];
+    if (peak < kSilence) {
+      snprintf(part, sizeof(part), "%s silent, left alone", i ? "," : "");
+    } else {
+      const float wanted = kTargetDb - 20.0f * std::log10(peak);
+      const float gain = std::max(-kMaxGainDb, std::min(kMaxGainDb, wanted));
+      app.edit.tracks[i].gain_db = gain;
+      snprintf(part, sizeof(part), "%s %+.1f dB%s", i ? "," : "", gain, gain != wanted ? " (gain limit)" : "");
+    }
+    report += part;
+  }
+  std::lock_guard<std::mutex> lock(app.job_mutex);
+  app.job_message = report;
+  app.job_failed = false;
+}
+
 void SDLCALL on_record_folder(void* user, const char* const* files, int) {
   App& app = *static_cast<App*>(user);
   if (!files || !files[0]) return;
@@ -859,6 +897,12 @@ void draw_edit_tab(App& app) {
   ImGui::EndDisabled();
   ImGui::SameLine();
   ImGui::Checkbox("Hear aligned", &app.aligned);
+  ImGui::SameLine(0.0f, 24.0f * scale);
+  bool peaks_ready = true;
+  for (const auto& t : app.tracks) peaks_ready = peaks_ready && t->peaks_ready.load();
+  ImGui::BeginDisabled(busy || !peaks_ready);
+  if (ImGui::Button("Normalize all")) normalize_all(app);
+  ImGui::EndDisabled();
   ImGui::SameLine(0.0f, 24.0f * scale);
   ImGui::BeginDisabled(busy);
   if (ImGui::Button("Export aligned WAVs")) start_export_job(app);
