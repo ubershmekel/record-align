@@ -21,6 +21,7 @@
 
 #include "app/playback.h"
 #include "audio/capture.h"
+#include "audio/edits.h"
 #include "audio/recorder.h"
 #include "audio/session.h"
 #include "sync/export.h"
@@ -93,13 +94,37 @@ void build_peaks(const WavFile& wav, TrackPeaks* out, std::atomic<bool>* cancel)
 
 struct EditTrack {
   PlaybackTrack playback;
-  float gain_db = 0.0f;
-  float offset_ms = 0.0f;  // Shown in the UI. These two are only the editable form of the time map.
-  float drift_ppm = 0.0f;
-  SyncResult sync;
-  bool has_sync = false;
   TrackPeaks peaks;
   std::atomic<bool> peaks_ready{false};
+};
+
+// What the user can undo. Solo and the playhead are left out: they are for
+// listening, and undo shouldn't get stuck stepping back through them.
+struct TrackEditState {
+  float gain_db = 0.0f;
+  float offset_ms = 0.0f;
+  float drift_ppm = 0.0f;
+  bool mute = false;
+  std::shared_ptr<const SyncResult> sync;  // Shared to keep the undo history small.
+
+  bool operator==(const TrackEditState& o) const {
+    return gain_db == o.gain_db && offset_ms == o.offset_ms && drift_ppm == o.drift_ppm && mute == o.mute &&
+           sync == o.sync;
+  }
+};
+
+struct EditState {
+  std::vector<TrackEditState> tracks;
+  bool in_set = false;
+  bool out_set = false;
+  double in_point = 0.0;
+  double out_point = 0.0;
+
+  bool operator==(const EditState& o) const {
+    return tracks == o.tracks && in_set == o.in_set && out_set == o.out_set &&
+           (!in_set || in_point == o.in_point) && (!out_set || out_point == o.out_point);
+  }
+  bool operator!=(const EditState& o) const { return !(*this == o); }
 };
 
 struct App {
@@ -129,9 +154,10 @@ struct App {
   double timeline_end = 1.0;
   double view_start = 0.0;
   double view_seconds = 1.0;
-  double in_point = 0.0;
-  double out_point = 1.0;
-  bool trimmed = false;
+  EditState edit;       // Current values. Widgets change this directly.
+  EditState committed;  // The last settled values, on top of the undo stack.
+  std::vector<EditState> undo_stack;
+  std::vector<EditState> redo_stack;
 
   // Background jobs
   std::thread job_thread;
@@ -183,21 +209,24 @@ void update_timeline(App& app) {
   }
   timeline_extent(extents, &app.timeline_start, &app.timeline_end);
   if (app.timeline_end <= app.timeline_start) app.timeline_end = app.timeline_start + 1.0;
-  if (!app.trimmed) {
-    app.in_point = app.timeline_start;
-    app.out_point = app.timeline_end;
-  }
   app.playback.set_stop_at(app.timeline_end);
 }
 
-// Pushes the UI's offset and drift values to playback, or zero while comparing against unaligned.
-void apply_alignment(App& app) {
-  for (auto& t : app.tracks) {
-    t->playback.offset_seconds.store(app.aligned ? double(t->offset_ms) / 1000.0 : 0.0);
-    t->playback.drift.store(app.aligned ? double(t->drift_ppm) * 1e-6 : 0.0);
+// Pushes the current edits to playback, with zero timing while comparing against unaligned.
+void sync_playback(App& app) {
+  for (size_t i = 0; i < app.tracks.size(); i++) {
+    PlaybackTrack& p = app.tracks[i]->playback;
+    const TrackEditState& e = app.edit.tracks[i];
+    p.offset_seconds.store(app.aligned ? double(e.offset_ms) / 1000.0 : 0.0);
+    p.drift.store(app.aligned ? double(e.drift_ppm) * 1e-6 : 0.0);
+    p.gain.store(std::pow(10.0f, e.gain_db / 20.0f));
+    p.mute.store(e.mute);
   }
   update_timeline(app);
 }
+
+double effective_in(const App& app) { return app.edit.in_set ? app.edit.in_point : app.timeline_start; }
+double effective_out(const App& app) { return app.edit.out_set ? app.edit.out_point : app.timeline_end; }
 
 void close_session(App& app) {
   app.playback.set_tracks({});
@@ -205,6 +234,110 @@ void close_session(App& app) {
   if (app.peak_thread.joinable()) app.peak_thread.join();
   app.tracks.clear();
   app.session = Session();
+  app.edit = EditState();
+  app.committed = EditState();
+  app.undo_stack.clear();
+  app.redo_stack.clear();
+}
+
+void save_session_edits(App& app) {
+  SessionEdits saved;
+  saved.in_set = app.edit.in_set;
+  saved.out_set = app.edit.out_set;
+  saved.in_seconds = app.edit.in_point;
+  saved.out_seconds = app.edit.out_point;
+  for (size_t i = 0; i < app.edit.tracks.size(); i++) {
+    const TrackEditState& e = app.edit.tracks[i];
+    TrackEdit t;
+    t.name = app.session.tracks[i].name;
+    t.offset_ms = e.offset_ms;
+    t.drift_ppm = e.drift_ppm;
+    t.gain_db = e.gain_db;
+    t.mute = e.mute;
+    if (e.sync) {
+      t.has_sync = true;
+      t.sync = *e.sync;
+    }
+    saved.tracks.push_back(std::move(t));
+  }
+  std::string err;
+  if (!save_edits(app.session.dir, saved, &err)) app.edit_error = err;
+}
+
+void load_session_edits(App& app) {
+  SessionEdits saved;
+  if (!load_edits(app.session.dir, &saved)) return;
+  app.edit.in_set = saved.in_set;
+  app.edit.out_set = saved.out_set;
+  app.edit.in_point = saved.in_seconds;
+  app.edit.out_point = saved.out_seconds;
+  for (const TrackEdit& t : saved.tracks) {
+    for (size_t i = 0; i < app.session.tracks.size(); i++) {
+      if (app.session.tracks[i].name != t.name) continue;
+      TrackEditState& e = app.edit.tracks[i];
+      e.offset_ms = float(t.offset_ms);
+      e.drift_ppm = float(t.drift_ppm);
+      e.gain_db = float(t.gain_db);
+      e.mute = t.mute;
+      if (t.has_sync) e.sync = std::make_shared<const SyncResult>(t.sync);
+    }
+  }
+}
+
+// Records a finished change. Waiting until no widget is active turns a whole
+// slider drag into one undo step, and catches every kind of edit in one place.
+void commit_edits(App& app) {
+  if (app.edit == app.committed || ImGui::IsAnyItemActive()) return;
+  app.undo_stack.push_back(app.committed);
+  constexpr size_t kMaxUndoSteps = 200;
+  if (app.undo_stack.size() > kMaxUndoSteps) app.undo_stack.erase(app.undo_stack.begin());
+  app.redo_stack.clear();
+  app.committed = app.edit;
+  save_session_edits(app);
+}
+
+void undo_edit(App& app) {
+  commit_edits(app);
+  if (app.undo_stack.empty() || ImGui::IsAnyItemActive()) return;
+  app.redo_stack.push_back(app.committed);
+  app.committed = std::move(app.undo_stack.back());
+  app.undo_stack.pop_back();
+  app.edit = app.committed;
+  save_session_edits(app);
+}
+
+void redo_edit(App& app) {
+  commit_edits(app);
+  if (app.redo_stack.empty() || ImGui::IsAnyItemActive()) return;
+  app.undo_stack.push_back(app.committed);
+  app.committed = std::move(app.redo_stack.back());
+  app.redo_stack.pop_back();
+  app.edit = app.committed;
+  save_session_edits(app);
+}
+
+// Names the difference between two states, for the undo and redo tooltips.
+std::string describe_change(const EditState& a, const EditState& b) {
+  if (a.in_set != b.in_set || a.out_set != b.out_set || (a.in_set && a.in_point != b.in_point) ||
+      (a.out_set && a.out_point != b.out_point)) {
+    return "trim";
+  }
+  int gains = 0;
+  bool timing = false, sync = false, mute = false;
+  for (size_t i = 0; i < a.tracks.size() && i < b.tracks.size(); i++) {
+    const TrackEditState& x = a.tracks[i];
+    const TrackEditState& y = b.tracks[i];
+    if (x.sync != y.sync) sync = true;
+    if (x.offset_ms != y.offset_ms || x.drift_ppm != y.drift_ppm) timing = true;
+    if (x.mute != y.mute) mute = true;
+    if (x.gain_db != y.gain_db) gains++;
+  }
+  if (sync) return "align tracks";
+  if (timing) return "timing change";
+  if (mute) return "mute";
+  if (gains > 1) return "gain on several tracks";
+  if (gains == 1) return "gain change";
+  return "edit";
 }
 
 void load_session_into_editor(App& app, const fs::path& dir) {
@@ -222,8 +355,11 @@ void load_session_into_editor(App& app, const fs::path& dir) {
     t->playback.wav = st.wav.get();
     app.tracks.push_back(std::move(t));
   }
-  app.trimmed = false;
-  apply_alignment(app);
+  app.edit.tracks.resize(app.tracks.size());
+  load_session_edits(app);
+  app.committed = app.edit;
+  app.aligned = true;
+  sync_playback(app);
   app.view_start = app.timeline_start;
   app.view_seconds = app.timeline_end - app.timeline_start;
 
@@ -275,15 +411,14 @@ void collect_sync_results(App& app) {
   if (!app.job_sync_done) return;
   app.job_sync_done = false;
   for (auto& [index, result] : app.job_sync_results) {
-    EditTrack& t = *app.tracks[index];
-    t.offset_ms = float(result.map.offset_seconds * 1000.0);
-    t.drift_ppm = float(result.map.drift * 1e6);
-    t.sync = std::move(result);
-    t.has_sync = true;
+    TrackEditState& e = app.edit.tracks[index];
+    e.offset_ms = float(result.map.offset_seconds * 1000.0);
+    e.drift_ppm = float(result.map.drift * 1e6);
+    e.sync = std::make_shared<const SyncResult>(std::move(result));
   }
   app.job_sync_results.clear();
   app.aligned = true;
-  apply_alignment(app);
+  sync_playback(app);
   app.view_start = app.timeline_start;
   app.view_seconds = app.timeline_end - app.timeline_start;
 }
@@ -297,21 +432,22 @@ void start_export_job(App& app) {
   for (auto& t : app.tracks) any_solo = any_solo || t->playback.solo.load();
   for (size_t i = 0; i < app.tracks.size(); i++) {
     EditTrack& t = *app.tracks[i];
+    const TrackEditState& state = app.edit.tracks[i];
     ExportTrack e;
     e.audio = view_of(*t.playback.wav);
-    e.map.offset_seconds = double(t.offset_ms) / 1000.0;
-    e.map.drift = double(t.drift_ppm) * 1e-6;
+    e.map.offset_seconds = double(state.offset_ms) / 1000.0;
+    e.map.drift = double(state.drift_ppm) * 1e-6;
     e.name = app.session.tracks[i].name;
-    e.gain = t.playback.gain.load();
-    e.in_mix = !t.playback.mute.load() && (!any_solo || t.playback.solo.load());
+    e.gain = std::pow(10.0f, state.gain_db / 20.0f);
+    e.in_mix = !state.mute && (!any_solo || t.playback.solo.load());
     jobs.push_back(std::move(e));
   }
   ExportOptions options;
   options.out_dir = app.session.dir / "aligned";
   options.sample_rate = app.session.tracks[0].wav->sample_rate();
-  options.use_range = app.trimmed;
-  options.range_start = app.in_point;
-  options.range_end = app.out_point;
+  options.use_range = app.edit.in_set || app.edit.out_set;
+  options.range_start = effective_in(app);
+  options.range_end = effective_out(app);
   options.write_mix = app.write_mix;
 
   app.job_running.store(true);
@@ -587,12 +723,28 @@ void draw_waveform(const EditTrack& t, const ImVec2& p, const ImVec2& size, doub
 
 void draw_edit_tab(App& app) {
   collect_sync_results(app);
+  sync_playback(app);
 
   if (ImGui::Button("Open session folder...")) {
     SDL_ShowOpenFolderDialog(on_session_folder, &app, app.window, app.base_dir.c_str(), false);
   }
   if (!app.session.dir.empty()) {
     ImGui::SameLine();
+    ImGui::BeginDisabled(app.undo_stack.empty());
+    if (ImGui::Button("Undo")) undo_edit(app);
+    if (!app.undo_stack.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::SetTooltip("Undo %s (Ctrl+Z)", describe_change(app.undo_stack.back(), app.committed).c_str());
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(app.redo_stack.empty());
+    if (ImGui::Button("Redo")) redo_edit(app);
+    if (!app.redo_stack.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::SetTooltip("Redo %s (Ctrl+Y)", describe_change(app.redo_stack.back(), app.committed).c_str());
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(app.session.dir.u8string().c_str());
   }
   if (!app.edit_error.empty()) ImGui::TextColored(kRed, "%s", app.edit_error.c_str());
@@ -614,30 +766,34 @@ void draw_edit_tab(App& app) {
     if (playing) {
       app.playback.pause();
     } else {
-      if (app.playback.position() >= app.timeline_end) app.playback.seek(app.in_point);
+      if (app.playback.position() >= app.timeline_end) app.playback.seek(effective_in(app));
       app.playback.play();
     }
   }
   ImGui::EndDisabled();
   ImGui::SameLine();
-  if (ImGui::Button("Back to start")) app.playback.seek(app.in_point);
+  if (ImGui::Button("Back to start")) app.playback.seek(effective_in(app));
   ImGui::SameLine();
   ImGui::AlignTextToFramePadding();
   ImGui::Text("%s", format_time_precise(app.playback.position()).c_str());
   ImGui::SameLine(0.0f, 24.0f * scale);
   if (ImGui::Button("Set in")) {
-    app.in_point = std::min(app.playback.position(), app.out_point);
-    app.trimmed = true;
+    app.edit.in_set = true;
+    app.edit.in_point = std::min(app.playback.position(), effective_out(app));
   }
   ImGui::SameLine();
   if (ImGui::Button("Set out")) {
-    app.out_point = std::max(app.playback.position(), app.in_point);
-    app.trimmed = true;
+    app.edit.out_set = true;
+    app.edit.out_point = std::max(app.playback.position(), effective_in(app));
   }
   ImGui::SameLine();
   ImGui::AlignTextToFramePadding();
-  ImGui::TextColored(kMuted, "Trim %s to %s", format_time_precise(app.in_point).c_str(),
-                     format_time_precise(app.out_point).c_str());
+  if (app.edit.in_set || app.edit.out_set) {
+    ImGui::TextColored(kAmber, "Trim %s to %s", format_time_precise(effective_in(app)).c_str(),
+                       format_time_precise(effective_out(app)).c_str());
+  } else {
+    ImGui::TextColored(kMuted, "No trim");
+  }
   ImGui::SameLine(0.0f, 24.0f * scale);
   if (ImGui::Button("Zoom in")) {
     double center = app.view_start + app.view_seconds * 0.5;
@@ -663,7 +819,7 @@ void draw_edit_tab(App& app) {
   if (ImGui::Button("Align tracks")) start_sync_job(app);
   ImGui::EndDisabled();
   ImGui::SameLine();
-  if (ImGui::Checkbox("Hear aligned", &app.aligned)) apply_alignment(app);
+  ImGui::Checkbox("Hear aligned", &app.aligned);
   ImGui::SameLine(0.0f, 24.0f * scale);
   ImGui::BeginDisabled(busy);
   if (ImGui::Button("Export aligned WAVs")) start_export_job(app);
@@ -717,6 +873,7 @@ void draw_edit_tab(App& app) {
 
   for (size_t i = 0; i < app.tracks.size(); i++) {
     EditTrack& t = *app.tracks[i];
+    TrackEditState& e = app.edit.tracks[i];
     const SessionTrack& st = app.session.tracks[i];
     ImGui::PushID(int(i));
     const ImVec2 lane_pos = ImGui::GetCursorScreenPos();
@@ -725,10 +882,9 @@ void draw_edit_tab(App& app) {
                       ImGuiWindowFlags_NoScrollbar);
     ImGui::TextUnformatted(st.name.c_str());
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", st.wav_path.u8string().c_str());
-    bool mute = t.playback.mute.load();
     bool solo = t.playback.solo.load();
-    ImGui::PushStyleColor(ImGuiCol_Button, mute ? ImVec4(0.72f, 0.42f, 0.14f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
-    if (ImGui::SmallButton("Mute")) t.playback.mute.store(!mute);
+    ImGui::PushStyleColor(ImGuiCol_Button, e.mute ? ImVec4(0.72f, 0.42f, 0.14f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
+    if (ImGui::SmallButton("Mute")) e.mute = !e.mute;
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, solo ? ImVec4(0.20f, 0.55f, 0.30f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
@@ -736,28 +892,24 @@ void draw_edit_tab(App& app) {
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::SliderFloat("##gain", &t.gain_db, -40.0f, 20.0f, "%.1f dB")) {
-      t.playback.gain.store(std::pow(10.0f, t.gain_db / 20.0f));
-    }
+    ImGui::SliderFloat("##gain", &e.gain_db, -40.0f, 40.0f, "%.1f dB");
     if (i == 0) {
       ImGui::TextColored(kMuted, "Reference track");
     } else {
-      bool changed = false;
       ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
-      changed |= ImGui::DragFloat("ms##offset", &t.offset_ms, 0.1f, 0.0f, 0.0f, "%.2f");
+      ImGui::DragFloat("ms##offset", &e.offset_ms, 0.1f, 0.0f, 0.0f, "%.2f");
       ImGui::SameLine();
       ImGui::SetNextItemWidth(-40.0f * scale);
-      changed |= ImGui::DragFloat("ppm##drift", &t.drift_ppm, 0.1f, -500.0f, 500.0f, "%.2f");
-      if (changed && app.aligned) apply_alignment(app);
-      if (t.has_sync) {
-        ImVec4 color = t.sync.confidence >= 0.7 ? kGreen : (t.sync.confidence >= 0.4 ? kAmber : kRed);
-        ImGui::TextColored(color, "%s confidence", confidence_label(t.sync.confidence));
+      ImGui::DragFloat("ppm##drift", &e.drift_ppm, 0.1f, -500.0f, 500.0f, "%.2f");
+      if (e.sync) {
+        ImVec4 color = e.sync->confidence >= 0.7 ? kGreen : (e.sync->confidence >= 0.4 ? kAmber : kRed);
+        ImGui::TextColored(color, "%s confidence", confidence_label(e.sync->confidence));
         if (ImGui::IsItemHovered()) {
           ImGui::SetNextWindowSize(ImVec2(420.0f * scale, 0.0f));
           ImGui::BeginTooltip();
-          ImGui::TextWrapped("%s", t.sync.message.c_str());
-          ImGui::TextColored(kMuted, "Method: %s. Matches used: %d of %d.", sync_method_name(t.sync.method),
-                             t.sync.anchors_used, t.sync.anchors_usable);
+          ImGui::TextWrapped("%s", e.sync->message.c_str());
+          ImGui::TextColored(kMuted, "Method: %s. Matches used: %d of %d.", sync_method_name(e.sync->method),
+                             e.sync->anchors_used, e.sync->anchors_usable);
           ImGui::EndTooltip();
         }
       }
@@ -787,10 +939,10 @@ void draw_edit_tab(App& app) {
     draw->PushClipRect(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), true);
     draw->AddRectFilled(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
                         IM_COL32(24, 26, 31, 255));
-    const bool silent = t.playback.mute.load() || (any_solo && !t.playback.solo.load());
+    const bool silent = e.mute || (any_solo && !t.playback.solo.load());
     draw_waveform(t, canvas_pos, canvas_size, app.view_start, app.view_seconds, draw, silent);
-    if (t.has_sync && app.aligned) {
-      for (const auto& a : t.sync.anchors) {
+    if (e.sync && app.aligned) {
+      for (const auto& a : e.sync->anchors) {
         if (!a.inlier) continue;
         float x = canvas_pos.x + float((a.ref_seconds - app.view_start) / app.view_seconds * canvas_width);
         draw->AddTriangleFilled(ImVec2(x - 4.0f, canvas_pos.y), ImVec2(x + 4.0f, canvas_pos.y),
@@ -806,11 +958,11 @@ void draw_edit_tab(App& app) {
   // Overlays that span every lane.
   draw->PushClipRect(ImVec2(canvas_x, lanes_top), ImVec2(canvas_x + canvas_width, lanes_bottom), true);
   auto to_x = [&](double when) { return canvas_x + float((when - app.view_start) / app.view_seconds * canvas_width); };
-  if (app.in_point > app.timeline_start) {
-    draw->AddRectFilled(ImVec2(canvas_x, lanes_top), ImVec2(to_x(app.in_point), lanes_bottom), IM_COL32(0, 0, 0, 130));
+  if (app.edit.in_set) {
+    draw->AddRectFilled(ImVec2(canvas_x, lanes_top), ImVec2(to_x(app.edit.in_point), lanes_bottom), IM_COL32(0, 0, 0, 130));
   }
-  if (app.out_point < app.timeline_end) {
-    draw->AddRectFilled(ImVec2(to_x(app.out_point), lanes_top), ImVec2(canvas_x + canvas_width, lanes_bottom),
+  if (app.edit.out_set) {
+    draw->AddRectFilled(ImVec2(to_x(app.edit.out_point), lanes_top), ImVec2(canvas_x + canvas_width, lanes_bottom),
                         IM_COL32(0, 0, 0, 130));
   }
   const float head = to_x(app.playback.position());
@@ -821,12 +973,12 @@ void draw_edit_tab(App& app) {
 
   bool warned = false;
   for (size_t i = 1; i < app.tracks.size(); i++) {
-    const EditTrack& t = *app.tracks[i];
-    if (t.has_sync && t.sync.confidence < 0.7) {
+    const std::shared_ptr<const SyncResult>& sync = app.edit.tracks[i].sync;
+    if (sync && sync->confidence < 0.7) {
       if (!warned) ImGui::Spacing();
       warned = true;
-      ImGui::PushStyleColor(ImGuiCol_Text, t.sync.confidence < 0.4 ? kRed : kAmber);
-      ImGui::TextWrapped("%s: %s", app.session.tracks[i].name.c_str(), t.sync.message.c_str());
+      ImGui::PushStyleColor(ImGuiCol_Text, sync->confidence < 0.4 ? kRed : kAmber);
+      ImGui::TextWrapped("%s: %s", app.session.tracks[i].name.c_str(), sync->message.c_str());
       ImGui::PopStyleColor();
     }
   }
@@ -964,6 +1116,14 @@ int main(int argc, char** argv) {
         ImGui::EndTabItem();
       }
       ImGui::EndTabBar();
+    }
+    if (!app.tracks.empty()) {
+      commit_edits(app);
+      if (!io.WantTextInput && (io.KeyCtrl && !io.KeyAlt)) {
+        const bool z = ImGui::IsKeyPressed(ImGuiKey_Z);
+        if (z && !io.KeyShift) undo_edit(app);
+        if ((z && io.KeyShift) || ImGui::IsKeyPressed(ImGuiKey_Y)) redo_edit(app);
+      }
     }
     ImGui::End();
 
