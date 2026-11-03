@@ -83,9 +83,11 @@ add_executable(record-align-cli src/cli/main.cpp)
 target_link_libraries(record-align-cli PRIVATE ra_core)
 
 if(RA_APP)
+  configure_file(src/app/app.rc.in ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
   add_executable(record-align WIN32
     src/app/main.cpp
     src/app/playback.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/app.rc
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp

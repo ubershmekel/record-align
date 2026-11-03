@@ -1,4 +1,5 @@
 // Desktop UI: pick microphones, record, then align, listen and export.
+#include <windows.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <imgui.h>
@@ -1836,6 +1837,12 @@ int main(int argc, char** argv) {
       arm_all = true;
     } else if (!strcmp(argv[i], "--tab") && i + 1 < argc) {
       start_on_edit = !strcmp(argv[++i], "edit");
+    } else if (argv[i][0] != '-') {
+      // Plain path argument: treat a .reca file as its parent directory.
+      fs::path p = fs::u8path(argv[i]);
+      if (p.extension() == ".reca") p = p.parent_path();
+      static std::string reca_dir = p.u8string();
+      open_dir = reca_dir.c_str();
     }
   }
 
@@ -1845,6 +1852,15 @@ int main(int argc, char** argv) {
   }
   const float dpi = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
   SDL_Window* window = SDL_CreateWindow("record-align", int(1180 * dpi), int(760 * dpi), SDL_WINDOW_RESIZABLE);
+  if (window) {
+    HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+    if (hwnd) {
+      HICON hSmall = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+      HICON hBig   = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+      if (hSmall) SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hSmall);
+      if (hBig)   SendMessage(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hBig);
+    }
+  }
   SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
   if (!renderer) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "record-align", SDL_GetError(), nullptr);
