@@ -79,33 +79,62 @@ struct TrackPeaks {
   std::vector<float> maximum;
   std::vector<float> coarse_minimum;
   std::vector<float> coarse_maximum;
+  // Per-channel peaks for stereo display (one entry per channel, up to 2).
+  std::vector<std::vector<float>> ch_minimum;
+  std::vector<std::vector<float>> ch_maximum;
+  std::vector<std::vector<float>> ch_coarse_minimum;
+  std::vector<std::vector<float>> ch_coarse_maximum;
+  int channels = 1;
 };
 
 void build_peaks(const WavFile& wav, TrackPeaks* out, std::atomic<bool>* cancel) {
   const int ch = wav.channels();
+  out->channels = ch;
   const uint64_t buckets = wav.frames() / kPeakBucketFrames + 1;
   out->minimum.assign(size_t(buckets), 0.0f);
   out->maximum.assign(size_t(buckets), 0.0f);
+  const int per_ch = std::min(ch, 2);
+  out->ch_minimum.assign(per_ch, std::vector<float>(size_t(buckets), 0.0f));
+  out->ch_maximum.assign(per_ch, std::vector<float>(size_t(buckets), 0.0f));
   for (uint64_t b = 0; b < buckets; b++) {
     if (cancel->load()) return;
     const uint64_t first = b * kPeakBucketFrames;
     const uint64_t last = std::min<uint64_t>(wav.frames(), first + kPeakBucketFrames);
     float lo = 0.0f, hi = 0.0f;
+    float ch_lo[2] = {0.0f, 0.0f};
+    float ch_hi[2] = {0.0f, 0.0f};
     const float* s = wav.samples() + first * ch;
-    for (uint64_t i = 0; i < (last - first) * ch; i++) {
-      lo = std::min(lo, s[i]);
-      hi = std::max(hi, s[i]);
+    for (uint64_t f = 0; f < (last - first); f++) {
+      for (int c = 0; c < ch; c++) {
+        const float v = s[f * ch + c];
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+        if (c < 2) {
+          ch_lo[c] = std::min(ch_lo[c], v);
+          ch_hi[c] = std::max(ch_hi[c], v);
+        }
+      }
     }
     out->minimum[size_t(b)] = lo;
     out->maximum[size_t(b)] = hi;
+    for (int c = 0; c < per_ch; c++) {
+      out->ch_minimum[c][size_t(b)] = ch_lo[c];
+      out->ch_maximum[c][size_t(b)] = ch_hi[c];
+    }
   }
   const size_t coarse = out->minimum.size() / kCoarsePeakFactor + 1;
   out->coarse_minimum.assign(coarse, 0.0f);
   out->coarse_maximum.assign(coarse, 0.0f);
+  out->ch_coarse_minimum.assign(per_ch, std::vector<float>(coarse, 0.0f));
+  out->ch_coarse_maximum.assign(per_ch, std::vector<float>(coarse, 0.0f));
   for (size_t i = 0; i < out->minimum.size(); i++) {
-    size_t c = i / kCoarsePeakFactor;
+    const size_t c = i / kCoarsePeakFactor;
     out->coarse_minimum[c] = std::min(out->coarse_minimum[c], out->minimum[i]);
     out->coarse_maximum[c] = std::max(out->coarse_maximum[c], out->maximum[i]);
+    for (int ci = 0; ci < per_ch; ci++) {
+      out->ch_coarse_minimum[ci][c] = std::min(out->ch_coarse_minimum[ci][c], out->ch_minimum[ci][i]);
+      out->ch_coarse_maximum[ci][c] = std::max(out->ch_coarse_maximum[ci][c], out->ch_maximum[ci][i]);
+    }
   }
 }
 
@@ -765,6 +794,16 @@ void draw_settings_tab(App& app) {
   ImGui::PushTextWrapPos(0.0f);
   ImGui::TextColored(kMuted, "Preferences are saved automatically when you change them.");
   ImGui::PopTextWrapPos();
+  ImGui::Spacing();
+  ImGui::SeparatorText("About");
+  ImGui::TextUnformatted("record-align on GitHub:");
+  ImGui::SameLine();
+  const char* kGithubUrl = "https://github.com/ubershmekel/record-align";
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.72f, 1.0f, 1.0f));
+  ImGui::TextUnformatted(kGithubUrl);
+  ImGui::PopStyleColor();
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Click to open in your browser");
+  if (ImGui::IsItemClicked()) SDL_OpenURL(kGithubUrl);
 }
 
 void draw_meter(float level, float hold, const ImVec2& size) {
@@ -1010,20 +1049,18 @@ void draw_record_tab(App& app) {
   }
 }
 
-// Converts min/max at the mapped file position into a waveform column.
-void draw_waveform(const EditTrack& t, const ImVec2& p, const ImVec2& size, double view_start, double view_seconds,
-                   ImDrawList* draw, bool muted) {
-  const WavFile& wav = *t.playback.wav;
+// Renders one waveform channel (ch_idx >= 0) or all channels mixed (ch_idx == -1).
+void draw_channel_waveform(const WavFile& wav,
+                            const std::vector<float>& peak_min, const std::vector<float>& peak_max,
+                            const std::vector<float>& coarse_min, const std::vector<float>& coarse_max,
+                            int ch_idx, double offset, double drift,
+                            const ImVec2& p, const ImVec2& size,
+                            double view_start, double view_seconds,
+                            ImDrawList* draw, ImU32 color) {
   const double rate = wav.sample_rate();
-  const double offset = t.playback.offset_seconds.load();
-  const double drift = t.playback.drift.load();
+  const int ch = wav.channels();
   const float mid = p.y + size.y * 0.5f;
-  const float scale = size.y * 0.48f;
-  const ImU32 color = muted ? IM_COL32(95, 100, 110, 255) : IM_COL32(95, 170, 225, 255);
-  if (!t.peaks_ready.load()) {
-    draw->AddText(ImVec2(p.x + 8.0f, p.y + 6.0f), IM_COL32(160, 165, 175, 255), "Reading waveform...");
-    return;
-  }
+  const float amp = size.y * 0.48f;
   const int columns = int(size.x);
   for (int x = 0; x < columns; x++) {
     const double t0 = view_start + view_seconds * x / columns;
@@ -1036,33 +1073,77 @@ void draw_waveform(const EditTrack& t, const ImVec2& p, const ImVec2& size, doub
     float lo = 0.0f, hi = 0.0f;
     const uint64_t span = last > first ? last - first : 1;
     if (span < kPeakBucketFrames) {
-      const int ch = wav.channels();
       const float* s = wav.samples() + first * ch;
-      for (uint64_t i = 0; i < span * ch; i++) {
-        lo = std::min(lo, s[i]);
-        hi = std::max(hi, s[i]);
+      if (ch_idx < 0) {
+        for (uint64_t i = 0; i < span * ch; i++) {
+          lo = std::min(lo, s[i]);
+          hi = std::max(hi, s[i]);
+        }
+      } else {
+        for (uint64_t f = 0; f < span; f++) {
+          const float v = s[f * ch + ch_idx];
+          lo = std::min(lo, v);
+          hi = std::max(hi, v);
+        }
       }
     } else if (span < uint64_t(kPeakBucketFrames) * kCoarsePeakFactor * 2) {
       size_t b0 = size_t(first / kPeakBucketFrames);
-      size_t b1 = std::min(t.peaks.minimum.size(), size_t(last / kPeakBucketFrames) + 1);
+      size_t b1 = std::min(peak_min.size(), size_t(last / kPeakBucketFrames) + 1);
       for (size_t b = b0; b < b1; b++) {
-        lo = std::min(lo, t.peaks.minimum[b]);
-        hi = std::max(hi, t.peaks.maximum[b]);
+        lo = std::min(lo, peak_min[b]);
+        hi = std::max(hi, peak_max[b]);
       }
     } else {
-      const uint64_t coarse = uint64_t(kPeakBucketFrames) * kCoarsePeakFactor;
-      size_t b0 = size_t(first / coarse);
-      size_t b1 = std::min(t.peaks.coarse_minimum.size(), size_t(last / coarse) + 1);
+      const uint64_t coarse_bucket = uint64_t(kPeakBucketFrames) * kCoarsePeakFactor;
+      size_t b0 = size_t(first / coarse_bucket);
+      size_t b1 = std::min(coarse_min.size(), size_t(last / coarse_bucket) + 1);
       for (size_t b = b0; b < b1; b++) {
-        lo = std::min(lo, t.peaks.coarse_minimum[b]);
-        hi = std::max(hi, t.peaks.coarse_maximum[b]);
+        lo = std::min(lo, coarse_min[b]);
+        hi = std::max(hi, coarse_max[b]);
       }
     }
     lo = std::max(lo, -1.0f);
     hi = std::min(hi, 1.0f);
-    const float top = mid - hi * scale;
-    const float bottom = std::max(mid - lo * scale, top + 1.0f);
+    const float top = mid - hi * amp;
+    const float bottom = std::max(mid - lo * amp, top + 1.0f);
     draw->AddLine(ImVec2(p.x + x + 0.5f, top), ImVec2(p.x + x + 0.5f, bottom), color);
+  }
+}
+
+// Draws the waveform for a track. Stereo tracks are split: L on top half, R on bottom half.
+void draw_waveform(const EditTrack& t, const ImVec2& p, const ImVec2& size, double view_start, double view_seconds,
+                   ImDrawList* draw, bool muted) {
+  const WavFile& wav = *t.playback.wav;
+  if (!t.peaks_ready.load()) {
+    draw->AddText(ImVec2(p.x + 8.0f, p.y + 6.0f), IM_COL32(160, 165, 175, 255), "Reading waveform...");
+    return;
+  }
+  const double offset = t.playback.offset_seconds.load();
+  const double drift = t.playback.drift.load();
+  const ImU32 color_l = muted ? IM_COL32(95, 100, 110, 255) : IM_COL32(95, 170, 225, 255);
+  const int ch = wav.channels();
+  if (ch >= 2 && int(t.peaks.ch_minimum.size()) >= 2) {
+    const float half_h = std::floor(size.y * 0.5f);
+    const float divider_y = p.y + half_h;
+    draw->AddLine(ImVec2(p.x, divider_y), ImVec2(p.x + size.x, divider_y), IM_COL32(50, 55, 65, 180));
+    draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + 4.0f, p.y + 1.0f),
+                  IM_COL32(120, 140, 160, 180), "L");
+    draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + 4.0f, divider_y + 1.0f),
+                  IM_COL32(120, 140, 160, 180), "R");
+    const ImU32 color_r = muted ? IM_COL32(95, 100, 110, 255) : IM_COL32(85, 155, 215, 255);
+    draw_channel_waveform(wav, t.peaks.ch_minimum[0], t.peaks.ch_maximum[0],
+                          t.peaks.ch_coarse_minimum[0], t.peaks.ch_coarse_maximum[0],
+                          0, offset, drift, p, ImVec2(size.x, half_h),
+                          view_start, view_seconds, draw, color_l);
+    draw_channel_waveform(wav, t.peaks.ch_minimum[1], t.peaks.ch_maximum[1],
+                          t.peaks.ch_coarse_minimum[1], t.peaks.ch_coarse_maximum[1],
+                          1, offset, drift, ImVec2(p.x, divider_y), ImVec2(size.x, size.y - half_h),
+                          view_start, view_seconds, draw, color_r);
+  } else {
+    draw_channel_waveform(wav, t.peaks.minimum, t.peaks.maximum,
+                          t.peaks.coarse_minimum, t.peaks.coarse_maximum,
+                          -1, offset, drift, p, size,
+                          view_start, view_seconds, draw, color_l);
   }
 }
 
@@ -1538,15 +1619,36 @@ void draw_edit_tab(App& app) {
                         IM_COL32(24, 26, 31, 255));
     const bool silent = e.mute || (any_solo && !t.playback.solo.load());
     draw_waveform(t, canvas_pos, canvas_size, app.view_start, app.view_seconds, draw, silent);
+    const SyncAnchor* hovered_anchor = nullptr;
     if (e.sync && app.aligned) {
+      const ImVec2 mouse = ImGui::GetMousePos();
+      const float pip_half = 5.0f * scale;
+      const float pip_h = 11.0f * scale;
       for (const auto& a : e.sync->anchors) {
-        if (!a.inlier) continue;
         float x = canvas_pos.x + float((a.ref_seconds - app.view_start) / app.view_seconds * canvas_width);
-        draw->AddTriangleFilled(ImVec2(x - 4.0f, canvas_pos.y), ImVec2(x + 4.0f, canvas_pos.y),
-                                ImVec2(x, canvas_pos.y + 7.0f), IM_COL32(120, 210, 130, 230));
+        if (x < canvas_pos.x - pip_half || x > canvas_pos.x + canvas_width + pip_half) continue;
+        if (a.inlier) {
+          draw->AddTriangleFilled(ImVec2(x - pip_half, canvas_pos.y), ImVec2(x + pip_half, canvas_pos.y),
+                                  ImVec2(x, canvas_pos.y + pip_h), IM_COL32(120, 210, 130, 230));
+          if (!hovered_anchor && mouse.x >= x - pip_half && mouse.x <= x + pip_half &&
+              mouse.y >= canvas_pos.y && mouse.y <= canvas_pos.y + pip_h) {
+            hovered_anchor = &a;
+          }
+        } else {
+          draw->AddTriangleFilled(ImVec2(x - pip_half * 0.5f, canvas_pos.y),
+                                  ImVec2(x + pip_half * 0.5f, canvas_pos.y),
+                                  ImVec2(x, canvas_pos.y + pip_h * 0.5f), IM_COL32(150, 155, 160, 100));
+        }
       }
     }
     draw->PopClipRect();
+    if (hovered_anchor) {
+      const double residual = hovered_anchor->lag_seconds -
+                              (e.sync->map.offset_seconds + e.sync->map.drift * hovered_anchor->ref_seconds);
+      ImGui::SetTooltip("Sync point at %s\nMeasured offset: %.2f ms\nOff fit by: %+.2f ms\nStrength: %.0f",
+                        format_time_precise(hovered_anchor->ref_seconds).c_str(),
+                        hovered_anchor->lag_seconds * 1000.0, residual * 1000.0, hovered_anchor->strength);
+    }
     ImGui::SetCursorScreenPos(ImVec2(lane_pos.x, lane_pos.y + lane_height + 4.0f * scale));
     ImGui::PopID();
   }
@@ -1566,7 +1668,7 @@ void draw_edit_tab(App& app) {
   draw->AddLine(ImVec2(head, lanes_top), ImVec2(head, lanes_bottom), IM_COL32(240, 240, 240, 230), 1.5f);
   draw->PopClipRect();
 
-  ImGui::TextColored(kMuted, "Click a waveform to move the playhead. Scroll over it to zoom. Green marks show the sounds used to align.");
+  ImGui::TextColored(kMuted, "Click a waveform to move the playhead. Scroll to zoom. Green pips mark sounds used to align (hover for details). Gray pips were found but not used.");
 
   draw_alignment_report(app);
 }
