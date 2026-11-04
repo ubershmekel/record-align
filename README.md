@@ -171,6 +171,12 @@ CLI and README into a zip with a SHA-256 checksum:
 ./package-macos.sh dev
 ```
 
+Local builds sign the completed app bundle, including its microphone purpose string.
+Ad-hoc signing ties permissions to that particular executable; a rebuild may ask for
+microphone access again. To retain permission across rebuilds, configure an installed
+Apple Development or Developer ID identity with `-DRA_MACOS_SIGN_IDENTITY="..."`.
+Packaging preserves that identity. Notarization remains a separate distribution step.
+
 `task build`, `task test`, `task run` and `task package` work on both platforms.
 
 ### Code map

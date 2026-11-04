@@ -89,3 +89,15 @@ alignment marker.  Intended for use as a window icon and in marketing materials.
   a Finder-like PATH and the real >4 GB RF64 test also passed. Real microphone capture and device
   unplugging still require a manual check; no microphone audio was recorded.
 - Per the user's revised request, no commit, push, tag or GitHub release was made.
+
+## 2026-11-03 — microphone authorization fixes (Codex)
+
+- Committed the original macOS port as `bc7ba7a` at the user's request.
+- The build-folder app had only a linker signature: its Info.plist was not bound
+  and the bundle had no sealed resources. CMake now signs the completed app and
+  CLI with explicit bundle identifiers on every relink. Packaging preserves these
+  signatures. `RA_MACOS_SIGN_IDENTITY` can select an installed signing identity;
+  ad-hoc builds can still need fresh consent after the executable changes.
+- Authorization uses the async completion's granted result directly and prevents
+  repeated requests in the same process if macOS fails to retain a decision.
+- Added `.DS_Store` to the ignored local files.

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cmath>
 #include <thread>
+#include <mutex>
 
 namespace {
 
@@ -71,18 +72,31 @@ UInt32 input_channels(AudioDeviceID device) {
 }
 
 bool microphone_access(std::string* err) {
+  // Serialize requests and allow at most one prompt per process if TCC cannot
+  // retain the decision (for example, when running an incorrectly signed build).
+  static std::mutex permission_mutex;
+  static bool requested = false;
+  std::lock_guard<std::mutex> lock(permission_mutex);
   @autoreleasepool {
     AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
-    if (status == AVAuthorizationStatusNotDetermined) {
+    if (status == AVAuthorizationStatusNotDetermined && !requested) {
+      requested = true;
+      __block BOOL allowed = NO;
       dispatch_semaphore_t ready = dispatch_semaphore_create(0);
       [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+        allowed = granted;
         dispatch_semaphore_signal(ready);
       }];
       dispatch_semaphore_wait(ready, DISPATCH_TIME_FOREVER);
+      if (allowed) return true;  // Use the completed request's result directly.
       status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
     }
     if (status == AVAuthorizationStatusAuthorized) return true;
-    if (err) *err = "Microphone access denied. Enable record-align in System Settings > Privacy & Security > Microphone.";
+    if (err) {
+      *err = status == AVAuthorizationStatusNotDetermined
+        ? "macOS did not retain microphone authorization. Quit and reopen the signed record-align.app bundle."
+        : "Microphone access denied. Enable record-align in System Settings > Privacy & Security > Microphone.";
+    }
     return false;
   }
 }

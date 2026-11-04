@@ -23,6 +23,9 @@ endif()
 
 option(RA_ASAN "Build with AddressSanitizer" OFF)
 option(RA_APP "Build the desktop UI" ON)
+if(APPLE)
+  set(RA_MACOS_SIGN_IDENTITY "-" CACHE STRING "macOS signing identity (- for ad-hoc local builds)")
+endif()
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
@@ -146,6 +149,15 @@ if(RA_APP)
       MACOSX_BUNDLE_GUI_IDENTIFIER com.ubershmekel.record-align
       MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
       MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
+    # The linker's implicit signature does not bind Info.plist or seal the bundle.
+    # TCC needs the completed app signed, including local builds launched by Task.
+    set_property(TARGET record-align APPEND PROPERTY LINK_DEPENDS
+      ${CMAKE_CURRENT_BINARY_DIR}/record-align.app/Contents/Info.plist
+      ${CMAKE_SOURCE_DIR}/assets/logo.icns)
+    add_custom_command(TARGET record-align POST_BUILD
+      COMMAND /usr/bin/codesign --force --sign "${RA_MACOS_SIGN_IDENTITY}"
+        --identifier com.ubershmekel.record-align --timestamp=none "$<TARGET_BUNDLE_DIR:record-align>"
+      VERBATIM)
   endif()
 endif()
 
@@ -167,4 +179,10 @@ if(APPLE)
   configure_file(src/app/cli-Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/cli-Info.plist @ONLY)
   target_link_options(record-align-cli PRIVATE
     "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/cli-Info.plist")
+  set_property(TARGET record-align-cli APPEND PROPERTY LINK_DEPENDS
+    ${CMAKE_CURRENT_BINARY_DIR}/cli-Info.plist)
+  add_custom_command(TARGET record-align-cli POST_BUILD
+    COMMAND /usr/bin/codesign --force --sign "${RA_MACOS_SIGN_IDENTITY}"
+      --identifier com.ubershmekel.record-align.cli --timestamp=none "$<TARGET_FILE:record-align-cli>"
+    VERBATIM)
 endif()

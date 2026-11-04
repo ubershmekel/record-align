@@ -2,3 +2,5 @@ build/
 dist/
 recordings/
 *.wav
+
+.DS_Store
