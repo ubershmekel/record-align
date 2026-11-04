@@ -111,3 +111,7 @@ alignment marker.  Intended for use as a window icon and in marketing materials.
   density. Verified a 1180x760 window renders at 2360x1520 with font density 2.0.
 - Rebuilt and repackaged the universal app; all 34 default tests pass. User checking
   of interactive microphone consent remains pending.
+- Follow-up Retina check found SDL's geometry renderer also needs an explicit
+  render scale. Applied the current ImGui framebuffer scale each frame, matching
+  the upstream SDL renderer example. Verified the UI fills the entire 2360x1520
+  framebuffer and the clap guide and text render correctly.

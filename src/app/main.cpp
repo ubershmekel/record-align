@@ -2038,6 +2038,9 @@ int main(int argc, char** argv) {
     ImGui::End();
 
     ImGui::Render();
+    // SDL geometry stays in window coordinates; the renderer must map those
+    // coordinates to physical pixels, matching ImGui's Retina font density.
+    SDL_SetRenderScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
     SDL_SetRenderDrawColor(renderer, 20, 21, 25, 255);
     SDL_RenderClear(renderer);
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
