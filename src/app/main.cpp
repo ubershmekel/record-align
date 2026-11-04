@@ -984,6 +984,9 @@ void draw_record_tab(App& app) {
     if (ImGui::Button("Stop recording", ImVec2(180.0f * ImGui::GetStyle().FontScaleDpi, 44.0f * ImGui::GetStyle().FontScaleDpi))) {
       app.recorder.stop();
       app.last_session = app.recorder.session_dir();
+      load_session_into_editor(app, app.last_session);
+      app.session_is_permanent = true;
+      app.tab_request = 2;
     }
     ImGui::SameLine();
     ImGui::BeginGroup();

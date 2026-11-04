@@ -115,3 +115,8 @@ alignment marker.  Intended for use as a window icon and in marketing materials.
   render scale. Applied the current ImGui framebuffer scale each frame, matching
   the upstream SDL renderer example. Verified the UI fills the entire 2360x1520
   framebuffer and the clap guide and text render correctly.
+
+## 2026-11-03 — open editor after recording (Codex)
+
+- Stopping a recording now loads the finished session and selects the Edit tab.
+  Recorded sessions are marked as saved because their audio is already on disk.
