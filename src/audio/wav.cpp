@@ -1,10 +1,21 @@
+#include "platform/files.h"
 #include "audio/wav.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define _fseeki64 fseeko
+#define _commit fsync
+#define _fileno fileno
+#endif
 
 #include <cctype>
 #include <cstring>
-#include <io.h>
 
 namespace {
 
@@ -50,7 +61,7 @@ bool WavWriter::open(const std::filesystem::path& path, int sample_rate, int cha
   rf64_ = false;
   channels_ = channels;
   error_.clear();
-  file_ = _wfopen(path.c_str(), L"wb");
+  file_ = open_file(path.c_str(), "wb");
   if (!file_) {
     if (err) *err = "Could not create " + path.u8string();
     return false;
@@ -151,11 +162,16 @@ bool WavWriter::close() {
 WavFile::~WavFile() { close(); }
 
 void WavFile::close() {
+#ifdef _WIN32
   if (view_) UnmapViewOfFile(view_);
   if (mapping_) CloseHandle(mapping_);
   if (file_handle_) CloseHandle(file_handle_);
   file_handle_ = nullptr;
   mapping_ = nullptr;
+#else
+  if (view_) munmap(const_cast<uint8_t*>(view_), mapped_size_);
+  mapped_size_ = 0;
+#endif
   view_ = nullptr;
   samples_ = nullptr;
   frames_ = 0;
@@ -172,6 +188,7 @@ bool WavFile::open(const std::filesystem::path& path, std::string* err) {
     return false;
   };
 
+#ifdef _WIN32
   // FILE_SHARE_WRITE allows opening a file another process is still recording.
   HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -187,6 +204,21 @@ bool WavFile::open(const std::filesystem::path& path, std::string* err) {
   if (!mapping_) return fail("could not map file");
   view_ = static_cast<const uint8_t*>(MapViewOfFile(mapping_, FILE_MAP_READ, 0, 0, 0));
   if (!view_) return fail("could not map file view");
+#else
+  int file = ::open(path.c_str(), O_RDONLY);
+  if (file < 0) return fail("could not open file");
+  struct stat info = {};
+  if (fstat(file, &info) != 0 || info.st_size < 12) {
+    ::close(file);
+    return fail("too small to be a WAV file");
+  }
+  uint64_t file_size = uint64_t(info.st_size);
+  void* mapped = mmap(nullptr, size_t(file_size), PROT_READ, MAP_PRIVATE, file, 0);
+  ::close(file);
+  if (mapped == MAP_FAILED) return fail("could not map file");
+  mapped_size_ = size_t(file_size);
+  view_ = static_cast<const uint8_t*>(mapped);
+#endif
 
   bool is_rf64 = std::memcmp(view_, "RF64", 4) == 0;
   if ((!is_rf64 && std::memcmp(view_, "RIFF", 4) != 0) || std::memcmp(view_ + 8, "WAVE", 4) != 0) {

@@ -10,7 +10,7 @@ editor.
 
 It works two ways:
 
-- **Record:** capture several microphones at once on one Windows PC, each to its own
+- **Record:** capture several microphones at once on one Windows PC or Mac, each to its own
   file. It needs no virtual audio devices, mixers or ASIO drivers.
 - **Import:** bring in video and audio files you already have, and line them up.
 
@@ -32,7 +32,15 @@ Any sharp sound works, and shared speech often does too, but claps are the most 
 [Releases](../../releases) page, unzip it and run `record-align.exe`. Importing files
 also needs [ffmpeg](https://ffmpeg.org/download.html) on your PATH. Recording doesn't.
 
-macOS isn't supported yet.
+**macOS 11 or later (Apple Silicon and Intel):** download the macOS universal zip,
+unzip it, and drag `record-align.app` into Applications. Allow microphone access when
+asked. If you previously denied it, enable record-align in **System Settings >
+Privacy & Security > Microphone**.
+
+The Mac app is ad-hoc signed and isn't notarized. For a downloaded build, macOS may
+require **System Settings > Privacy & Security > Open Anyway** after the first launch
+attempt. Importing requires `ffmpeg` and `ffprobe`; `brew install ffmpeg` installs both.
+The app also checks the standard Homebrew paths when opened from Finder.
 
 ## Record microphones
 
@@ -42,7 +50,7 @@ macOS isn't supported yet.
 4. Press **Open in editor**, then **Align tracks**.
 5. Check the result, then press **Export aligned WAVs**.
 
-Recordings go in `Music\record-align Recordings` unless you choose another folder in
+Recordings go in the `record-align Recordings` folder inside Music unless you choose another folder in
 **Settings**.
 
 ## Line up existing files
@@ -67,13 +75,13 @@ number of audio files under it.
 |---|---|
 | **Play**, or Space | Plays all tracks together. Click a waveform to move the playhead, and scroll to zoom. |
 | **Mute** | Silences a track. |
-| **Solo** | Hears only this track. Click again to hear everything. Shift-click or Ctrl-click adds a track. |
+| **Solo** | Hears only this track. Click again to hear everything. Shift-click or Ctrl-click (Command-click on Mac) adds a track. |
 | **dB** | Sets a track's volume. |
 | **ms** | Offset: how far into this track the master's first moment falls. |
 | **ppm** | Drift: how much faster this track's clock runs than the master's. 1 ppm is 3.6 ms per hour. |
 | **Set in**, **Set out** | Trims the export. |
 | **Normalize all** | Sets each track's gain so its loudest moment reaches -1 dB. Claps count, so set in and out points past them to bring up speech. |
-| **Undo**, **Redo** | Ctrl+Z and Ctrl+Y or Ctrl+Shift+Z. Covers gain, mute, timing, alignment and trim, but not solo. |
+| **Undo**, **Redo** | Ctrl+Z and Ctrl+Y or Ctrl+Shift+Z (Command on Mac). Covers gain, mute, timing, alignment and trim, but not solo. |
 
 Hover over anything for an explanation. Right-click gain, ms, ppm, Set in, Set out or a
 track's name to reset it. Double-click a number to type a value.
@@ -107,8 +115,6 @@ distances.
 
 ## Limitations
 
-- **Windows only for now.** macOS needs its own capture code, and the release workflow
-  would then need a Mac job.
 - **Sound takes time to travel,** about 3 ms per metre. Alignment lines up what each mic
   heard, so clap near the middle of the group.
 - **Close-talking mics can be hard to match** without claps, if each mic hears almost
@@ -145,11 +151,35 @@ build\Release\record-align-cli.exe record --device 0 --device 2 --seconds 3600 -
 build\Release\record-align-cli.exe sync recordings\SESSION --export --mix
 ```
 
+### macOS build
+
+Install Xcode Command Line Tools and CMake (`brew install cmake`). Dependencies download
+on the first configure. For a universal app that runs on Apple Silicon and Intel:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+open build/record-align.app
+```
+
+`build/record-align-cli` provides the same CLI commands shown above. Package the app,
+CLI and README into a zip with a SHA-256 checksum:
+
+```bash
+./package-macos.sh dev
+```
+
+`task build`, `task test`, `task run` and `task package` work on both platforms.
+
 ### Code map
 
 | Path | Job |
 |---|---|
 | `src/audio/capture_wasapi.cpp` | Windows capture. The rest of the code only sees `capture.h`. |
+| `src/audio/capture_coreaudio.mm` | macOS HAL capture with a separate stream per microphone. |
+| `src/platform/` | Portable file handling and shell-free child processes. |
 | `src/audio/recorder.cpp` | Ring buffers, disk thread, and silence in place of anything missing. |
 | `src/audio/wav.cpp` | WAV writing that survives crashes, RF64 past 4 GB, and memory-mapped reading. |
 | `src/audio/import.cpp` | Pulls audio out of existing files with ffmpeg. |
@@ -186,15 +216,17 @@ clicks and keys into the interface and logs the resulting state.
 
 ### Releases
 
-Pushing a tag like `v0.1.0` makes GitHub Actions build, test and publish a Windows zip. See
+Pushing a tag like `v0.2.0` makes GitHub Actions build, test and publish Windows and
+universal macOS zips. Every push to main and pull request also builds and tests both
+platforms and uploads downloadable artifacts. See
 `.github/workflows/release.yml`.
 
 ```bash
-git tag v0.1.0
+git tag v0.2.0
 ```
 
 ```bash
-git push origin v0.1.0
+git push origin v0.2.0
 ```
 
 ### Manual test with real microphones

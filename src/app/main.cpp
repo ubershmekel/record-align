@@ -1,5 +1,8 @@
+#include "platform/files.h"
 // Desktop UI: pick microphones, record, then align, listen and export.
+#ifdef _WIN32
 #include <windows.h>
+#endif
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <imgui.h>
@@ -302,7 +305,7 @@ void toggle_playback(App& app) {
 void click_solo(App& app, size_t index) {
   const ImGuiIO& io = ImGui::GetIO();
   std::atomic<bool>& clicked = app.tracks[index]->playback.solo;
-  if (io.KeyShift || io.KeyCtrl) {
+  if (io.KeyShift || io.KeyCtrl || io.KeySuper) {
     clicked.store(!clicked.load());
     return;
   }
@@ -680,7 +683,7 @@ std::string pref_dir() {
 void save_prefs(const App& app) {
   const std::string dir = pref_dir();
   if (dir.empty()) return;
-  FILE* f = _wfopen((fs::u8path(dir) / "prefs.txt").c_str(), L"w");
+  FILE* f = open_file((fs::u8path(dir) / "prefs.txt").c_str(), "w");
   if (!f) return;
   fprintf(f, "record_dir %s\n", app.base_dir.c_str());
   if (!app.last_open_dir.empty()) fprintf(f, "open_dir %s\n", app.last_open_dir.c_str());
@@ -690,7 +693,7 @@ void save_prefs(const App& app) {
 void load_prefs(App& app) {
   const std::string dir = pref_dir();
   if (dir.empty()) return;
-  FILE* f = _wfopen((fs::u8path(dir) / "prefs.txt").c_str(), L"r");
+  FILE* f = open_file((fs::u8path(dir) / "prefs.txt").c_str(), "r");
   if (!f) return;
   char line[4096];
   while (fgets(line, sizeof(line), f)) {
@@ -910,7 +913,7 @@ void draw_record_tab(App& app) {
       ImGui::AlignTextToFramePadding();
       ImGui::TextColored(kMuted, "%.1f kHz, %s", device.sample_rate / 1000.0,
                          device.channels == 1 ? "mono" : (device.channels == 2 ? "stereo" : "multi"));
-      tip("The format Windows provides for this microphone. It is recorded as is, without converting.");
+      tip("The format the operating system provides for this microphone. It is recorded as is, without converting.");
       ImGui::TableNextColumn();
       const TrackStatus* status = nullptr;
       for (const auto& s : app.status) {
@@ -1198,7 +1201,7 @@ void draw_alignment_report(App& app) {
       "Sharp sounds found in both tracks and used for the fit, out of all that were strong enough to consider.",
       "How far apart the strongest matches landed. Zero to 1 ms is tight. Several ms suggests echoes, effects on the "
       "microphone, or sounds made at different distances.",
-      "The estimate from Windows capture times alone, before listening to the audio. It doesn't know each device's "
+      "The estimate from device capture times alone, before listening to the audio. It doesn't know each device's "
       "own latency.",
   };
   if (ImGui::BeginTable("alignment", 8, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerH)) {
@@ -1716,14 +1719,16 @@ void apply_dialog_results(App& app) {
   }
 }
 
-// A dropped folder opens as a session. Dropped files are imported together.
+// A dropped folder or project opens as a session. Other files are imported together.
 void apply_dropped_files(App& app) {
   std::vector<std::string> files;
   files.swap(app.dropped_files);
   if (files.empty() || app.recorder.recording()) return;
   std::error_code ec;
-  if (files.size() == 1 && fs::is_directory(fs::u8path(files[0]), ec)) {
-    load_session_into_editor(app, fs::u8path(files[0]));
+  fs::path first = fs::u8path(files[0]);
+  if (files.size() == 1 && (fs::is_directory(first, ec) || first.extension() == ".reca")) {
+    if (first.extension() == ".reca") first = first.parent_path();
+    load_session_into_editor(app, first);
     app.tab_request = 2;
   } else {
     start_import_job(app, files);
@@ -1864,6 +1869,7 @@ int main(int argc, char** argv) {
   }
   const float dpi = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
   SDL_Window* window = SDL_CreateWindow("record-align", int(1180 * dpi), int(760 * dpi), SDL_WINDOW_RESIZABLE);
+#ifdef _WIN32
   if (window) {
     HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
     if (hwnd) {
@@ -1873,6 +1879,7 @@ int main(int argc, char** argv) {
       if (hBig)   SendMessage(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hBig);
     }
   }
+#endif
   SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
   if (!renderer) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "record-align", SDL_GetError(), nullptr);
@@ -1909,7 +1916,12 @@ int main(int argc, char** argv) {
   style.TabBarOverlineSize = 2.0f;
   style.ScaleAllSizes(dpi);
   style.FontScaleDpi = dpi;
-  if (fs::exists("C:/Windows/Fonts/segoeui.ttf")) io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", 16.0f);
+#ifdef __APPLE__
+  const char* font_path = "/System/Library/Fonts/Supplemental/Arial.ttf";
+#else
+  const char* font_path = "C:/Windows/Fonts/segoeui.ttf";
+#endif
+  if (fs::exists(font_path)) io.Fonts->AddFontFromFileTTF(font_path, 16.0f);
   ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
   ImGui_ImplSDLRenderer3_Init(renderer);
 
@@ -2006,12 +2018,12 @@ int main(int argc, char** argv) {
       ImGui::EndTabBar();
       // Only on the Edit tab, so a stray key press can't touch a recording.
       if (edit_tab_open && !app.tracks.empty() && !io.WantTextInput) {
-        if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Space, false)) toggle_playback(app);
+        if (!io.KeyCtrl && !io.KeySuper && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_Space, false)) toggle_playback(app);
       }
     }
     if (!app.tracks.empty()) {
       commit_edits(app);
-      if (!io.WantTextInput && (io.KeyCtrl && !io.KeyAlt)) {
+      if (!io.WantTextInput && ((io.KeyCtrl || io.KeySuper) && !io.KeyAlt)) {
         const bool z = ImGui::IsKeyPressed(ImGuiKey_Z);
         if (z && !io.KeyShift) undo_edit(app);
         if ((z && io.KeyShift) || ImGui::IsKeyPressed(ImGuiKey_Y)) redo_edit(app);

@@ -1,3 +1,4 @@
+#include "platform/files.h"
 #include <doctest/doctest.h>
 
 #include <cstdio>
@@ -68,7 +69,7 @@ TEST_CASE("audio written after the last checkpoint is recovered after a crash") 
     REQUIRE(w.close());
   }
   // Simulate a crash: put back a header that claims only the first 400 frames.
-  FILE* f = _wfopen(path.c_str(), L"r+b");
+  FILE* f = open_file(path.c_str(), "r+b");
   REQUIRE(f);
   uint32_t stale = 1600;
   fseek(f, 88, SEEK_SET);
@@ -93,7 +94,7 @@ TEST_CASE("a file with a zero-length header is recovered") {
     REQUIRE(w.write(data.data(), 100));
     REQUIRE(w.close());
   }
-  FILE* f = _wfopen(path.c_str(), L"r+b");
+  FILE* f = open_file(path.c_str(), "r+b");
   REQUIRE(f);
   uint32_t zero = 0;
   fseek(f, 88, SEEK_SET);
@@ -117,7 +118,7 @@ TEST_CASE("files past the RIFF size limit become RF64 and still read back") {
     REQUIRE(w.write(data.data(), 4000));
     REQUIRE(w.close());
   }
-  FILE* raw = _wfopen(path.c_str(), L"rb");
+  FILE* raw = open_file(path.c_str(), "rb");
   REQUIRE(raw);
   char id[5] = {};
   fread(id, 1, 4, raw);

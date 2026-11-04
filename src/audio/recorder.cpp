@@ -1,3 +1,4 @@
+#include "platform/files.h"
 #include "audio/recorder.h"
 
 #include <algorithm>
@@ -57,6 +58,9 @@ std::string json_escape(const std::string& s) {
 }  // namespace
 
 struct RecordTrack final : CaptureSink {
+  // Capture callbacks must finish before the fields they access are destroyed.
+  ~RecordTrack() override { stream.reset(); }
+
   InputDevice device;
   std::unique_ptr<CaptureStream> stream;
   std::atomic<int> sample_rate{0};
@@ -274,7 +278,7 @@ bool Recorder::is_armed(const std::string& device_id) const {
 bool Recorder::start(const fs::path& base_dir, std::string* err) {
   time_t now = time(nullptr);
   tm local;
-  localtime_s(&local, &now);
+  local_time(&now, &local);
   char name[64];
   strftime(name, sizeof(name), "%Y-%m-%d_%H-%M-%S", &local);
   return start_in(base_dir / name, err);
@@ -311,7 +315,7 @@ bool Recorder::start_in(const fs::path& session_dir, std::string* err) {
       for (auto& other : tracks_) other->close_files();
       return false;
     }
-    t->timing_file = _wfopen((session_dir / fs::u8path(stem + ".timing.csv")).c_str(), L"w");
+    t->timing_file = open_file((session_dir / fs::u8path(stem + ".timing.csv")).c_str(), "w");
     if (t->timing_file) fputs("kind,frame,host_seconds,count\n", t->timing_file);
     t->disk_failed.store(false);
     t->frames_written.store(0);
@@ -364,11 +368,11 @@ void Recorder::disk_loop() {
 }
 
 void Recorder::write_session_file() {
-  FILE* f = _wfopen((session_dir_ / "session.json").c_str(), L"w");
+  FILE* f = open_file((session_dir_ / "session.json").c_str(), "w");
   if (!f) return;
   time_t now = time(nullptr);
   tm utc;
-  gmtime_s(&utc, &now);
+  utc_time(&now, &utc);
   char stamp[32];
   strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
   fprintf(f, "{\n  \"written_at\": \"%s\",\n  \"tracks\": [\n", stamp);

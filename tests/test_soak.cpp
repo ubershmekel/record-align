@@ -1,9 +1,12 @@
 // Slow checks, skipped by default. Run with: mydaw-tests --no-skip -tc="soak*"
 #include <doctest/doctest.h>
 
+#ifdef _WIN32
 #include <windows.h>
-
 #include <psapi.h>
+#else
+#include <mach/mach.h>
+#endif
 
 #include <chrono>
 #include <filesystem>
@@ -18,10 +21,17 @@ namespace fs = std::filesystem;
 namespace {
 
 size_t private_bytes() {
+#ifdef _WIN32
   PROCESS_MEMORY_COUNTERS_EX counters = {};
   counters.cb = sizeof(counters);
   K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof(counters));
   return counters.PrivateUsage;
+#else
+  mach_task_basic_info_data_t info = {};
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count);
+  return info.resident_size;
+#endif
 }
 
 }  // namespace

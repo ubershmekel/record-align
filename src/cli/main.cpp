@@ -25,10 +25,10 @@ void handle_sigint(int) { g_stop = 1; }
 
 int usage() {
   puts(
-      "mydaw-cli list\n"
-      "mydaw-cli record --device N [--device N...] [--seconds S] [--out DIR]\n"
-      "mydaw-cli timing SESSION_DIR\n"
-      "mydaw-cli sync SESSION_DIR [--export] [--mix]");
+      "record-align-cli list\n"
+      "record-align-cli record --device N [--device N...] [--seconds S] [--out DIR]\n"
+      "record-align-cli timing SESSION_DIR\n"
+      "record-align-cli sync SESSION_DIR [--export] [--mix]");
   return 2;
 }
 

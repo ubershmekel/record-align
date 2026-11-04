@@ -1,3 +1,4 @@
+#include "platform/files.h"
 #include "audio/session.h"
 
 #include <algorithm>
@@ -9,7 +10,7 @@ namespace fs = std::filesystem;
 namespace {
 
 void load_timing(const fs::path& path, SessionTrack* track) {
-  FILE* f = _wfopen(path.c_str(), L"r");
+  FILE* f = open_file(path.c_str(), "r");
   if (!f) return;
   char line[128];
   while (fgets(line, sizeof(line), f)) {

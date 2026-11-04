@@ -1,3 +1,4 @@
+#include "platform/files.h"
 #include <doctest/doctest.h>
 
 #include <cstdio>
@@ -101,7 +102,7 @@ TEST_CASE("a session without edits, or with an unknown file, loads nothing") {
   SessionEdits loaded;
   CHECK_FALSE(load_edits(dir.path, &loaded));
 
-  FILE* f = _wfopen((dir.path / "project.reca").c_str(), L"w");
+  FILE* f = open_file((dir.path / "project.reca").c_str(), "w");
   REQUIRE(f);
   fputs("something else\ntrack x\n", f);
   fclose(f);

@@ -1,3 +1,4 @@
+#include "platform/files.h"
 #include "audio/edits.h"
 
 #include <cstdio>
@@ -32,7 +33,7 @@ bool save_edits(const fs::path& session_dir, const SessionEdits& edits, std::str
   fs::path temp_path = final_path;
   temp_path += ".tmp";
 
-  FILE* f = _wfopen(temp_path.c_str(), L"w");
+  FILE* f = open_file(temp_path.c_str(), "w");
   if (!f) {
     if (err) *err = "Could not save edits to " + final_path.u8string();
     return false;
@@ -71,8 +72,8 @@ bool save_edits(const fs::path& session_dir, const SessionEdits& edits, std::str
 
 bool load_edits(const fs::path& session_dir, SessionEdits* out) {
   *out = SessionEdits();
-  FILE* f = _wfopen((session_dir / kEditsFileName).c_str(), L"r");
-  if (!f) f = _wfopen((session_dir / kLegacyEditsFileName).c_str(), L"r");
+  FILE* f = open_file((session_dir / kEditsFileName).c_str(), "r");
+  if (!f) f = open_file((session_dir / kLegacyEditsFileName).c_str(), "r");
   if (!f) return false;
 
   char line[1024];

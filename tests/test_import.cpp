@@ -1,6 +1,7 @@
+#include "platform/files.h"
 #include <doctest/doctest.h>
 
-#include <windows.h>
+#include "platform/process.h"
 
 #include <algorithm>
 #include <atomic>
@@ -53,7 +54,7 @@ TEST_CASE("importing keeps samples, rate and channels, and leaves the original a
     return;
   }
   TempDir dir("import");
-  const fs::path input = dir.path / "my take.wav";
+  const fs::path input = dir.path / fs::u8path("my take 雪 '$();.wav");
   write_test_wav(input, 44100, 2, 44100);
   const auto size_before = fs::file_size(input);
 
@@ -66,7 +67,7 @@ TEST_CASE("importing keeps samples, rate and channels, and leaves the original a
 
   WavFile before, after;
   REQUIRE(before.open(input, &err));
-  REQUIRE(after.open(session / "01_my take.wav", &err));
+  REQUIRE(after.open(session / fs::u8path("01_my take 雪 '$();.wav"), &err));
   CHECK(after.sample_rate() == 44100);
   CHECK(after.channels() == 2);
   REQUIRE(after.frames() == before.frames());
@@ -84,17 +85,10 @@ TEST_CASE("a video file becomes the master even when it isn't first") {
   write_test_wav(audio, 48000, 1, 4800);
   // ffmpeg can read a WAV through any name only if told the format, so make a real video.
   const fs::path video = dir.path / "phone.mp4";
-  const std::wstring make = L"ffmpeg -v error -nostdin -y -f lavfi -i color=c=black:s=64x64:r=10:d=1 -i \"" +
-                            audio.wstring() + L"\" -c:v libx264 -c:a aac -shortest \"" + video.wstring() + L"\"";
-  STARTUPINFOW startup = {};
-  startup.cb = sizeof(startup);
-  PROCESS_INFORMATION process = {};
-  std::wstring command = make;
-  REQUIRE(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup,
-                         &process));
-  WaitForSingleObject(process.hProcess, INFINITE);
-  CloseHandle(process.hProcess);
-  CloseHandle(process.hThread);
+  REQUIRE(run_process({"ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+                       "color=c=black:s=64x64:r=10:d=1", "-i", audio.u8string(), "-c:v", "libx264",
+                       "-c:a", "aac", "-shortest", video.u8string()},
+                      [](const char*, size_t) { return true; }));
   REQUIRE(fs::exists(video));
 
   fs::path session;
@@ -115,7 +109,7 @@ TEST_CASE("a file with no audio fails with a clear message and leaves nothing be
   }
   TempDir dir("import_bad");
   const fs::path bad = dir.path / "notes.txt";
-  FILE* f = _wfopen(bad.c_str(), L"w");
+  FILE* f = open_file(bad.c_str(), "w");
   REQUIRE(f);
   fputs("not audio\n", f);
   fclose(f);

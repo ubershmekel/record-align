@@ -58,8 +58,12 @@ class WavFile {
   bool recovered() const { return recovered_; }
 
  private:
+#ifdef _WIN32
   void* file_handle_ = nullptr;
   void* mapping_ = nullptr;
+#else
+  size_t mapped_size_ = 0;
+#endif
   const uint8_t* view_ = nullptr;
   const float* samples_ = nullptr;
   uint64_t frames_ = 0;

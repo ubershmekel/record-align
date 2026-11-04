@@ -63,3 +63,29 @@ background job thread (reusing the existing single `job_thread`).  On completion
 
 `assets/logo.svg` — icon showing two offset waveforms that converge at a centre
 alignment marker.  Intended for use as a window icon and in marketing materials.
+
+---
+
+## 2026-11-03 — macOS port and local universal build (Codex)
+
+- Added `capture_coreaudio.mm`: independent HAL input units per microphone, float
+  capture at the device rate, device sample positions and shared Mach host times,
+  microphone authorization, and terminal errors on disconnect or render failure.
+- Added portable file/time helpers and shell-free child processes. macOS WAVs use
+  `mmap`, 64-bit seeking and `fsync`; Windows keeps its original APIs. Imports also
+  find ffmpeg/ffprobe in standard Homebrew locations when launched from Finder.
+- Added a macOS app bundle, SVG-derived ICNS icon, microphone purpose strings for
+  the app and CLI, `.reca` document registration/open handling, a system font, and
+  Command-key shortcuts. Capture streams now stop before their sink fields are
+  destroyed.
+- Added `package-macos.sh` for an ad-hoc-signed universal app/CLI zip and SHA-256
+  checksum. These builds are not Developer ID signed or notarized.
+- Extended the existing GitHub workflow with macOS build, test, desktop smoke test,
+  packaging and artifact upload; tagged releases wait for both platform jobs.
+  Updated Task commands and README for macOS and CMake 4 compatibility.
+- Local validation: universal arm64/x86_64 Release build; all 34 default tests and
+  2,215 assertions passed on each architecture (Intel via Rosetta). Desktop launch
+  and CoreAudio device enumeration succeeded. Import through the desktop app with
+  a Finder-like PATH and the real >4 GB RF64 test also passed. Real microphone capture and device
+  unplugging still require a manual check; no microphone audio was recorded.
+- Per the user's revised request, no commit, push, tag or GitHub release was made.

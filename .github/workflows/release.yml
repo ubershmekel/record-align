@@ -37,9 +37,41 @@ jobs:
           name: windows
           path: dist/*.zip
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg for the import tests
+        run: brew install ffmpeg
+
+      - name: Build universal macOS app
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Smoke test desktop app
+        run: build/record-align.app/Contents/MacOS/record-align --screenshot build/smoke.bmp --frames 10
+
+      - name: Package
+        env:
+          PACKAGE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+        run: ./package-macos.sh "$PACKAGE_VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
   release:
     if: github.ref_type == 'tag'
-    needs: [windows]
+    needs: [windows, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
