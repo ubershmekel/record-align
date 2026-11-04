@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+# Install Task: https://taskfile.dev/installation/
+
+version: "3"
+
+vars:
+  BUILD_DIR: build
+  VERSION: dev
+
+tasks:
+  configure:
+    desc: Configure the CMake build (run once, or after CMakeLists changes)
+    cmds:
+      - cmake -S . -B {{.BUILD_DIR}} -G "Visual Studio 17 2022" -A x64
+    generates:
+      - "{{.BUILD_DIR}}/CMakeCache.txt"
+
+  build:
+    desc: Build the Release binaries
+    deps: [configure]
+    cmds:
+      - cmake --build {{.BUILD_DIR}} --config Release --parallel
+
+  test:
+    desc: Run the test suite (requires ffmpeg on PATH for import tests)
+    deps: [build]
+    cmds:
+      - "{{.BUILD_DIR}}\\Release\\record-align-tests.exe"
+
+  run:
+    desc: Launch the app
+    deps: [build]
+    cmds:
+      - "{{.BUILD_DIR}}\\Release\\record-align.exe"
+
+  package:
+    desc: "Bundle a distributable zip (task package VERSION=1.2.0)"
+    deps: [build]
+    cmds:
+      - pwsh -File package.ps1 -Version "{{.VERSION}}"
