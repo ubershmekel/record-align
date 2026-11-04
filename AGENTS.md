@@ -101,3 +101,13 @@ alignment marker.  Intended for use as a window icon and in marketing materials.
 - Authorization uses the async completion's granted result directly and prevents
   repeated requests in the same process if macOS fails to retain a decision.
 - Added `.DS_Store` to the ignored local files.
+
+## 2026-11-03 — Retina text rendering (Codex)
+
+- Enabled `SDL_WINDOW_HIGH_PIXEL_DENSITY`. ImGui's SDL backends already track the
+  framebuffer scale and rasterize fonts at the correct density; the missing window
+  flag had left macOS enlarging a low-resolution surface.
+- Screenshot checks now log logical window size, actual framebuffer size and font
+  density. Verified a 1180x760 window renders at 2360x1520 with font density 2.0.
+- Rebuilt and repackaged the universal app; all 34 default tests pass. User checking
+  of interactive microphone consent remains pending.

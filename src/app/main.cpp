@@ -1811,6 +1811,12 @@ bool run_ui_script(App& app, UiScript& script) {
 }
 
 bool save_screenshot(SDL_Renderer* renderer, const char* path) {
+  SDL_Window* window = SDL_GetRenderWindow(renderer);
+  int width = 0, height = 0, pixel_width = 0, pixel_height = 0;
+  SDL_GetWindowSize(window, &width, &height);
+  SDL_GetRenderOutputSize(renderer, &pixel_width, &pixel_height);
+  SDL_Log("Screenshot: window %dx%d, framebuffer %dx%d, font density %.2f", width, height,
+          pixel_width, pixel_height, ImGui::GetIO().DisplayFramebufferScale.x);
   SDL_Surface* surface = SDL_RenderReadPixels(renderer, nullptr);
   if (!surface) return false;
   bool ok = SDL_SaveBMP(surface, path);
@@ -1868,7 +1874,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   const float dpi = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
-  SDL_Window* window = SDL_CreateWindow("record-align", int(1180 * dpi), int(760 * dpi), SDL_WINDOW_RESIZABLE);
+  SDL_Window* window = SDL_CreateWindow("record-align", int(1180 * dpi), int(760 * dpi), SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
 #ifdef _WIN32
   if (window) {
     HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
