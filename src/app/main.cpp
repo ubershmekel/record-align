@@ -1612,7 +1612,12 @@ void draw_edit_tab(App& app) {
     ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);  // Scrolling here zooms instead of scrolling the page.
     if (ImGui::IsItemActive() && !recording) {
       double when = app.view_start + (ImGui::GetIO().MousePos.x - canvas_pos.x) / canvas_width * app.view_seconds;
-      app.playback.seek(std::max(app.timeline_start, std::min(when, app.timeline_end)));
+      // Only seek on first click or actual horizontal movement — IsItemActive() is
+      // true every frame while held, which would restart the crossfade each frame
+      // and cause the playhead position to replay in a loop.
+      if (ImGui::IsItemClicked() || ImGui::GetIO().MouseDelta.x != 0.0f) {
+        app.playback.seek(std::max(app.timeline_start, std::min(when, app.timeline_end)));
+      }
     }
     if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f) {
       const double mouse_time = app.view_start + (ImGui::GetIO().MousePos.x - canvas_pos.x) / canvas_width * app.view_seconds;

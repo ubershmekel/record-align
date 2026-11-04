@@ -41,6 +41,8 @@ class Playback {
  private:
   static void callback(void* user, SDL_AudioStream* stream, int additional, int total);
   void render(float* stereo, int frames);
+  // Mix all active tracks into stereo[offset*2..] from timeline position 'start'.
+  void mix(float* stereo, int offset, int frames, double start) const;
 
   SDL_AudioStream* stream_ = nullptr;
   std::vector<PlaybackTrack*> tracks_;
@@ -48,7 +50,10 @@ class Playback {
   std::atomic<double> position_{0.0};
   std::atomic<double> stop_at_{0.0};
   std::atomic<bool> playing_{false};
-  // Set by seek(); render() applies it atomically so it never gets overwritten.
   static constexpr double kNoSeek = -1e300;
   std::atomic<double> pending_seek_{kNoSeek};
+  // De-click: crossfade through zero amplitude on seek (fade-out old, fade-in new).
+  static constexpr int kDeClickFrames = 512;
+  std::atomic<int> fade_out_frames_{0};
+  std::atomic<int> fade_in_frames_{0};
 };
