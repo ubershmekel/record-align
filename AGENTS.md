@@ -109,8 +109,8 @@ alignment marker.  Intended for use as a window icon and in marketing materials.
   flag had left macOS enlarging a low-resolution surface.
 - Screenshot checks now log logical window size, actual framebuffer size and font
   density. Verified a 1180x760 window renders at 2360x1520 with font density 2.0.
-- Rebuilt and repackaged the universal app; all 34 default tests pass. User checking
-  of interactive microphone consent remains pending.
+- Rebuilt and repackaged the universal app; all 34 default tests pass. The user
+  confirmed that microphone consent no longer repeats and text is crisp.
 - Follow-up Retina check found SDL's geometry renderer also needs an explicit
   render scale. Applied the current ImGui framebuffer scale each frame, matching
   the upstream SDL renderer example. Verified the UI fills the entire 2360x1520
