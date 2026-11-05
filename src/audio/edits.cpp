@@ -42,8 +42,11 @@ bool save_edits(const fs::path& session_dir, const SessionEdits& edits, std::str
   if (!edits.master_name.empty()) fprintf(f, "master %s\n", edits.master_name.c_str());
   if (edits.in_set) fprintf(f, "in %.17g\n", edits.in_seconds);
   if (edits.out_set) fprintf(f, "out %.17g\n", edits.out_seconds);
+  for (const std::string& d : edits.deleted_names) fprintf(f, "deleted %s\n", d.c_str());
   for (const TrackEdit& t : edits.tracks) {
     fprintf(f, "track %s\n", t.name.c_str());
+    if (t.channel_view >= 0) fprintf(f, "channel_view %d\n", t.channel_view);
+    if (!t.display_name.empty()) fprintf(f, "display_name %s\n", t.display_name.c_str());
     fprintf(f, "offset_ms %.17g\ndrift_ppm %.17g\ngain_db %.17g\nmute %d\n", t.offset_ms, t.drift_ppm, t.gain_db,
             t.mute ? 1 : 0);
     if (!t.has_sync) continue;
@@ -95,12 +98,18 @@ bool load_edits(const fs::path& session_dir, SessionEdits* out) {
     } else if (sscanf(line, "out %lf", &value) == 1) {
       out->out_set = true;
       out->out_seconds = value;
+    } else if (starts_with(line, "deleted ")) {
+      out->deleted_names.push_back(rest_of_line(line, strlen("deleted ")));
     } else if (starts_with(line, "track ")) {
       out->tracks.emplace_back();
       track = &out->tracks.back();
       track->name = rest_of_line(line, strlen("track "));
     } else if (!track) {
       continue;
+    } else if (sscanf(line, "channel_view %d", &flag) == 1) {
+      track->channel_view = flag;
+    } else if (starts_with(line, "display_name ")) {
+      track->display_name = rest_of_line(line, strlen("display_name "));
     } else if (sscanf(line, "offset_ms %lf", &value) == 1) {
       track->offset_ms = value;
     } else if (sscanf(line, "drift_ppm %lf", &value) == 1) {

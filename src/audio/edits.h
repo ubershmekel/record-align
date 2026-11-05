@@ -10,7 +10,9 @@
 // recordings. The WAV files themselves are never changed.
 
 struct TrackEdit {
-  std::string name;  // WAV file name without extension.
+  std::string name;  // WAV file name without extension (session track name, not display_name).
+  int channel_view = -1;      // -1=all channels, 0=L-only, 1=R-only
+  std::string display_name;   // non-empty for split tracks
   double offset_ms = 0.0;
   double drift_ppm = 0.0;
   double gain_db = 0.0;
@@ -26,6 +28,7 @@ struct SessionEdits {
   bool out_set = false;
   double in_seconds = 0.0;
   double out_seconds = 0.0;
+  std::vector<std::string> deleted_names;  // Session track name stems to skip on reload.
 };
 
 constexpr const char* kEditsFileName = "project.reca";

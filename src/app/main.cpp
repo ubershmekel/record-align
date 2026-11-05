@@ -242,6 +242,13 @@ struct App {
   bool edit_tab_was_open = false;
   std::string last_open_dir;        // Persisted across sessions.
   bool session_is_permanent = true; // False for fresh imports not yet saved to a folder.
+
+  // Tracks deleted since the session was last loaded. For permanent sessions,
+  // pending_wav_deletions holds the WAV paths to remove when the user clicks Save.
+  std::vector<std::string> deleted_track_names;
+  std::vector<fs::path> pending_wav_deletions;
+
+  bool edits_dirty = false; // True when edits have changed since last save to disk.
 };
 
 AudioView view_of(const WavFile& wav) {
@@ -332,21 +339,25 @@ void close_session(App& app) {
   app.committed = EditState();
   app.undo_stack.clear();
   app.redo_stack.clear();
+  app.edits_dirty = false;
+  app.deleted_track_names.clear();
+  app.pending_wav_deletions.clear();
 }
 
-void save_session_edits(App& app) {
+bool save_session_edits(App& app) {
   SessionEdits saved;
   saved.master_name = app.session.tracks[app.tracks[app.edit.master]->session_index].name;
   saved.in_set = app.edit.in_set;
   saved.out_set = app.edit.out_set;
   saved.in_seconds = app.edit.in_point;
   saved.out_seconds = app.edit.out_point;
+  saved.deleted_names = app.deleted_track_names;
   for (size_t i = 0; i < app.edit.tracks.size(); i++) {
     const TrackEditState& e = app.edit.tracks[i];
     TrackEdit t;
-    t.name = app.tracks[i]->display_name.empty()
-        ? app.session.tracks[app.tracks[i]->session_index].name
-        : app.tracks[i]->display_name;
+    t.name = app.session.tracks[app.tracks[i]->session_index].name;  // Always the session track name.
+    t.channel_view = app.tracks[i]->channel_view;
+    t.display_name = app.tracks[i]->display_name;
     t.offset_ms = e.offset_ms;
     t.drift_ppm = e.drift_ppm;
     t.gain_db = e.gain_db;
@@ -358,28 +369,55 @@ void save_session_edits(App& app) {
     saved.tracks.push_back(std::move(t));
   }
   std::string err;
-  if (!save_edits(app.session.dir, saved, &err)) app.edit_error = err;
+  if (!save_edits(app.session.dir, saved, &err)) { app.edit_error = err; return false; }
+  app.edits_dirty = false;
+  return true;
 }
 
-void load_session_edits(App& app) {
-  SessionEdits saved;
-  if (!load_edits(app.session.dir, &saved)) return;
+// Saves edits to disk and flushes any pending WAV deletions (for permanent sessions).
+void save_project(App& app) {
+  if (!save_session_edits(app)) return; // abort if edits couldn't be written
+  if (!app.pending_wav_deletions.empty()) {
+    for (const fs::path& p : app.pending_wav_deletions) {
+      std::error_code ec;
+      fs::remove(p, ec);
+      fs::path timing = p.parent_path() / (p.stem().u8string() + ".timing.csv");
+      fs::remove(timing, ec);
+    }
+    app.pending_wav_deletions.clear();
+    app.deleted_track_names.clear();
+    // Re-save without the deletion markers now that files are gone.
+    save_session_edits(app);
+  }
+  app.job_message = "Saved.";
+  app.job_failed = false;
+}
+
+void load_session_edits(App& app, const SessionEdits& saved) {
   app.edit.in_set = saved.in_set;
   app.edit.out_set = saved.out_set;
   app.edit.in_point = saved.in_seconds;
   app.edit.out_point = saved.out_seconds;
-  for (size_t i = 0; i < app.session.tracks.size(); i++) {
-    if (app.session.tracks[i].name == saved.master_name) app.edit.master = i;
+  // Find master in app.tracks by session track name; prefer non-split (channel_view <= 0).
+  for (size_t i = 0; i < app.tracks.size(); i++) {
+    const std::string& sname = app.session.tracks[app.tracks[i]->session_index].name;
+    if (sname == saved.master_name && app.tracks[i]->channel_view <= 0) {
+      app.edit.master = i;
+      break;
+    }
   }
+  // Apply per-track edits: match by session track name AND channel_view.
   for (const TrackEdit& t : saved.tracks) {
-    for (size_t i = 0; i < app.session.tracks.size(); i++) {
-      if (app.session.tracks[i].name != t.name) continue;
+    for (size_t i = 0; i < app.tracks.size(); i++) {
+      const std::string& sname = app.session.tracks[app.tracks[i]->session_index].name;
+      if (sname != t.name || app.tracks[i]->channel_view != t.channel_view) continue;
       TrackEditState& e = app.edit.tracks[i];
       e.offset_ms = float(t.offset_ms);
       e.drift_ppm = float(t.drift_ppm);
       e.gain_db = float(t.gain_db);
       e.mute = t.mute;
       if (t.has_sync) e.sync = std::make_shared<const SyncResult>(t.sync);
+      break;
     }
   }
 }
@@ -393,7 +431,7 @@ void commit_edits(App& app) {
   if (app.undo_stack.size() > kMaxUndoSteps) app.undo_stack.erase(app.undo_stack.begin());
   app.redo_stack.clear();
   app.committed = app.edit;
-  save_session_edits(app);
+  if (!app.session.dir.empty()) app.edits_dirty = true;
 }
 
 void undo_edit(App& app) {
@@ -403,7 +441,7 @@ void undo_edit(App& app) {
   app.committed = std::move(app.undo_stack.back());
   app.undo_stack.pop_back();
   app.edit = app.committed;
-  save_session_edits(app);
+  if (!app.session.dir.empty()) app.edits_dirty = true;
 }
 
 void redo_edit(App& app) {
@@ -413,7 +451,7 @@ void redo_edit(App& app) {
   app.committed = std::move(app.redo_stack.back());
   app.redo_stack.pop_back();
   app.edit = app.committed;
-  save_session_edits(app);
+  if (!app.session.dir.empty()) app.edits_dirty = true;
 }
 
 // Names the difference between two states, for the undo and redo tooltips.
@@ -445,20 +483,77 @@ void load_session_into_editor(App& app, const fs::path& dir) {
   if (app.job_running.load()) return;
   finish_job(app);
   close_session(app);
+  app.deleted_track_names.clear();
+  app.pending_wav_deletions.clear();
   app.edit_error.clear();
   app.job_message.clear();
   if (!load_session(dir, &app.session, &app.edit_error)) {
     app.session = Session();
     return;
   }
-  for (size_t j = 0; j < app.session.tracks.size(); j++) {
-    auto t = std::make_unique<EditTrack>();
-    t->playback.wav = app.session.tracks[j].wav.get();
-    t->session_index = j;
-    app.tracks.push_back(std::move(t));
+
+  // Load saved edits first to know about deletions and splits.
+  SessionEdits saved_edits;
+  const bool has_saved = load_edits(dir, &saved_edits);
+  if (has_saved) app.deleted_track_names = saved_edits.deleted_names;
+
+  // Filter out deleted tracks so they don't appear after reload.
+  if (!app.deleted_track_names.empty()) {
+    app.session.tracks.erase(
+      std::remove_if(app.session.tracks.begin(), app.session.tracks.end(),
+        [&](const SessionTrack& t) {
+          for (const std::string& d : app.deleted_track_names)
+            if (t.name == d) return true;
+          return false;
+        }),
+      app.session.tracks.end());
   }
+  if (app.session.tracks.empty()) {
+    app.edit_error = "No tracks remain in this session.";
+    app.session = Session();
+    return;
+  }
+
+  // Build app.tracks from saved edits when available; this reconstructs split
+  // stereo views. Fall back to one EditTrack per session track when nothing is saved.
+  if (has_saved && !saved_edits.tracks.empty()) {
+    for (const TrackEdit& te : saved_edits.tracks) {
+      size_t si = SIZE_MAX;
+      for (size_t j = 0; j < app.session.tracks.size(); j++) {
+        if (app.session.tracks[j].name == te.name) { si = j; break; }
+      }
+      if (si == SIZE_MAX) continue;
+      auto t = std::make_unique<EditTrack>();
+      t->playback.wav = app.session.tracks[si].wav.get();
+      t->session_index = si;
+      t->channel_view = te.channel_view;
+      t->display_name = te.display_name;
+      t->playback.channel_view.store(te.channel_view);
+      app.tracks.push_back(std::move(t));
+    }
+    // Add any session tracks not referenced by any saved entry (new tracks added
+    // to the folder after the last save).
+    for (size_t j = 0; j < app.session.tracks.size(); j++) {
+      bool found = false;
+      for (const auto& et : app.tracks) if (et->session_index == j) { found = true; break; }
+      if (!found) {
+        auto t = std::make_unique<EditTrack>();
+        t->playback.wav = app.session.tracks[j].wav.get();
+        t->session_index = j;
+        app.tracks.push_back(std::move(t));
+      }
+    }
+  } else {
+    for (size_t j = 0; j < app.session.tracks.size(); j++) {
+      auto t = std::make_unique<EditTrack>();
+      t->playback.wav = app.session.tracks[j].wav.get();
+      t->session_index = j;
+      app.tracks.push_back(std::move(t));
+    }
+  }
+
   app.edit.tracks.resize(app.tracks.size());
-  load_session_edits(app);
+  if (has_saved) load_session_edits(app, saved_edits);
   app.committed = app.edit;
   app.aligned = true;
   sync_playback(app);
@@ -1321,6 +1416,19 @@ void draw_alignment_report(App& app) {
 
 void delete_track(App& app, size_t i) {
   if (i >= app.tracks.size()) return;
+  const size_t si = app.tracks[i]->session_index;
+
+  // Only mark the underlying WAV for deletion when no other EditTrack still uses it.
+  bool other_uses = false;
+  for (size_t j = 0; j < app.tracks.size(); j++) {
+    if (j != i && app.tracks[j]->session_index == si) { other_uses = true; break; }
+  }
+  if (!other_uses) {
+    if (app.session_is_permanent)
+      app.pending_wav_deletions.push_back(app.session.tracks[si].wav_path);
+    app.deleted_track_names.push_back(app.session.tracks[si].name);
+  }
+
   if (app.edit.master == i) {
     // Promote the next track (or previous if last) to master.
     if (app.tracks.size() > 1)
@@ -1337,6 +1445,7 @@ void delete_track(App& app, size_t i) {
   std::vector<PlaybackTrack*> ptrs;
   for (auto& t : app.tracks) ptrs.push_back(&t->playback);
   app.playback.set_tracks(ptrs);
+  app.edits_dirty = true;
 }
 
 void split_stereo_track(App& app, size_t i) {
@@ -1378,6 +1487,7 @@ void split_stereo_track(App& app, size_t i) {
   std::vector<PlaybackTrack*> ptrs;
   for (auto& t : app.tracks) ptrs.push_back(&t->playback);
   app.playback.set_tracks(ptrs);
+  app.edits_dirty = true;
 }
 
 void draw_edit_tab(App& app) {
@@ -1401,6 +1511,22 @@ void draw_edit_tab(App& app) {
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(kAmber, "Not saved — changes may be lost.");
+    ImGui::SameLine();
+  }
+  if (app.session_is_permanent && !app.session.dir.empty() &&
+      (app.edits_dirty || !app.pending_wav_deletions.empty())) {
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button("Save")) save_project(app);
+    ImGui::EndDisabled();
+    tip("Save edits to project.reca and permanently remove any deleted track files. Ctrl+S also saves.");
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    if (!app.pending_wav_deletions.empty()) {
+      ImGui::TextColored(kAmber, "%d track(s) pending deletion, edits unsaved — Ctrl+S or Save",
+                         int(app.pending_wav_deletions.size()));
+    } else {
+      ImGui::TextColored(kAmber, "Unsaved changes — Ctrl+S or Save");
+    }
     ImGui::SameLine();
   }
   if (ImGui::Button("Open session folder...")) {
@@ -1753,24 +1879,50 @@ void draw_edit_tab(App& app) {
     const bool silent = e.mute || (any_solo && !t.playback.solo.load());
     draw_waveform(t, e.gain_db, canvas_pos, canvas_size, app.view_start, app.view_seconds, draw, silent);
     const SyncAnchor* hovered_anchor = nullptr;
-    if (e.sync && app.aligned) {
+    if (app.aligned) {
       const ImVec2 mouse = ImGui::GetMousePos();
       const float pip_half = 5.0f * scale;
       const float pip_h = 11.0f * scale;
-      for (const auto& a : e.sync->anchors) {
-        float x = canvas_pos.x + float((a.ref_seconds - app.view_start) / app.view_seconds * canvas_width);
-        if (x < canvas_pos.x - pip_half || x > canvas_pos.x + canvas_width + pip_half) continue;
-        if (a.inlier) {
-          draw->AddTriangleFilled(ImVec2(x - pip_half, canvas_pos.y), ImVec2(x + pip_half, canvas_pos.y),
-                                  ImVec2(x, canvas_pos.y + pip_h), IM_COL32(120, 210, 130, 230));
-          if (!hovered_anchor && mouse.x >= x - pip_half && mouse.x <= x + pip_half &&
-              mouse.y >= canvas_pos.y && mouse.y <= canvas_pos.y + pip_h) {
-            hovered_anchor = &a;
+      if (i == app.edit.master) {
+        // Show pips on the master track: collect ref_seconds from all other tracks.
+        // Use the first track that has sync anchors to avoid duplicate pips.
+        const std::vector<SyncAnchor>* anchors = nullptr;
+        for (size_t j = 0; j < app.edit.tracks.size(); j++) {
+          if (j != app.edit.master && app.edit.tracks[j].sync && !app.edit.tracks[j].sync->anchors.empty()) {
+            anchors = &app.edit.tracks[j].sync->anchors;
+            break;
           }
-        } else {
-          draw->AddTriangleFilled(ImVec2(x - pip_half * 0.5f, canvas_pos.y),
-                                  ImVec2(x + pip_half * 0.5f, canvas_pos.y),
-                                  ImVec2(x, canvas_pos.y + pip_h * 0.5f), IM_COL32(150, 155, 160, 100));
+        }
+        if (anchors) {
+          for (const auto& a : *anchors) {
+            float x = canvas_pos.x + float((a.ref_seconds - app.view_start) / app.view_seconds * canvas_width);
+            if (x < canvas_pos.x - pip_half || x > canvas_pos.x + canvas_width + pip_half) continue;
+            if (a.inlier) {
+              draw->AddTriangleFilled(ImVec2(x - pip_half, canvas_pos.y), ImVec2(x + pip_half, canvas_pos.y),
+                                      ImVec2(x, canvas_pos.y + pip_h), IM_COL32(120, 210, 130, 230));
+            } else {
+              draw->AddTriangleFilled(ImVec2(x - pip_half * 0.5f, canvas_pos.y),
+                                      ImVec2(x + pip_half * 0.5f, canvas_pos.y),
+                                      ImVec2(x, canvas_pos.y + pip_h * 0.5f), IM_COL32(150, 155, 160, 100));
+            }
+          }
+        }
+      } else if (e.sync) {
+        for (const auto& a : e.sync->anchors) {
+          float x = canvas_pos.x + float((a.ref_seconds - app.view_start) / app.view_seconds * canvas_width);
+          if (x < canvas_pos.x - pip_half || x > canvas_pos.x + canvas_width + pip_half) continue;
+          if (a.inlier) {
+            draw->AddTriangleFilled(ImVec2(x - pip_half, canvas_pos.y), ImVec2(x + pip_half, canvas_pos.y),
+                                    ImVec2(x, canvas_pos.y + pip_h), IM_COL32(120, 210, 130, 230));
+            if (!hovered_anchor && mouse.x >= x - pip_half && mouse.x <= x + pip_half &&
+                mouse.y >= canvas_pos.y && mouse.y <= canvas_pos.y + pip_h) {
+              hovered_anchor = &a;
+            }
+          } else {
+            draw->AddTriangleFilled(ImVec2(x - pip_half * 0.5f, canvas_pos.y),
+                                    ImVec2(x + pip_half * 0.5f, canvas_pos.y),
+                                    ImVec2(x, canvas_pos.y + pip_h * 0.5f), IM_COL32(150, 155, 160, 100));
+          }
         }
       }
     }
@@ -2090,6 +2242,25 @@ int main(int argc, char** argv) {
     collect_save_result(app);
     app.status = app.recorder.status();  // Reads and resets the meters, so call it once per frame.
 
+    // Keep the window title in sync with the dirty state.
+    {
+      const bool dirty = app.edits_dirty || !app.pending_wav_deletions.empty();
+      static bool last_dirty = false;
+      static std::string last_dir;
+      const std::string cur_dir = app.session.dir.u8string();
+      if (dirty != last_dirty || cur_dir != last_dir) {
+        last_dirty = dirty;
+        last_dir = cur_dir;
+        std::string title = "record-align";
+        if (!cur_dir.empty()) {
+          title += " — ";
+          title += fs::u8path(cur_dir).filename().u8string();
+        }
+        if (dirty) title += " *";
+        SDL_SetWindowTitle(window, title.c_str());
+      }
+    }
+
     bool script_done = false;
     if (script.input && frame > 30 && !app.job_running.load()) {
       bool peaks_done = true;
@@ -2150,6 +2321,10 @@ int main(int argc, char** argv) {
         const bool z = ImGui::IsKeyPressed(ImGuiKey_Z);
         if (z && !io.KeyShift) undo_edit(app);
         if ((z && io.KeyShift) || ImGui::IsKeyPressed(ImGuiKey_Y)) redo_edit(app);
+        if (ImGui::IsKeyPressed(ImGuiKey_S) && app.session_is_permanent && !app.session.dir.empty() &&
+            !app.job_running.load()) {
+          save_project(app);
+        }
       }
     }
     ImGui::End();

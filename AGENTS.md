@@ -123,6 +123,42 @@ alignment marker.  Intended for use as a window icon and in marketing materials.
 
 ---
 
+## 2026-11-04 — persist splits and deletions; Save button (Claude Sonnet 4.6)
+
+### Split stereo now persists
+
+`channel_view` and `display_name` added to `TrackEdit` in `edits.h` / `edits.cpp`.
+`save_session_edits()` now stores the original session track name (not display_name)
+as the identifier, plus `channel_view` and `display_name` as separate fields.
+`load_session_into_editor()` rebuilds `app.tracks` from the saved track list,
+creating two `EditTrack` entries pointing to the same `SessionTrack` when both L and
+R views are present.  `load_session_edits()` matches by session track name AND
+`channel_view` to apply per-track edit state correctly.  `split_stereo_track()` now
+calls `save_session_edits()` on completion.
+
+### Deleted tracks stay gone across reloads
+
+`SessionEdits` gains a `deleted_names` field (written as `deleted <stem>` lines in
+`project.reca`).  `delete_track()` adds the underlying session track name to
+`app.deleted_track_names` and calls `save_session_edits()`.
+`load_session_into_editor()` reads `deleted_names` from `project.reca` before
+building the track list and filters those `SessionTrack` entries out, so the WAV
+files are still on disk but are skipped on reload.
+
+Split views that share a WAV file only mark the file for deletion once both views
+have been removed (checked via `other_uses` scan in `delete_track()`).
+
+### Save button for permanent sessions
+
+`App` gains `pending_wav_deletions` and `deleted_track_names`.  For permanent
+(recorded) sessions, `delete_track()` also pushes the WAV path into
+`pending_wav_deletions`.  The Edit tab shows an amber counter and a **Save** button
+when `pending_wav_deletions` is non-empty; clicking it removes the WAV and
+`.timing.csv` files from disk and clears both lists.  The deletion markers are then
+removed from `project.reca` (they are no longer needed once the files are gone).
+
+---
+
 ## 2026-11-04 — UX pass (Claude Sonnet 4.6)
 
 Layout, labeling, spacing, and visual polish in `src/app/main.cpp`. No feature
@@ -151,3 +187,38 @@ or logic changes.
   To use real icon glyphs, embed a subset of Font Awesome or Material Icons as a
   second TTF in the ImGui font atlas; do not use `ImGui::ImageButton` with
   PNG/SVG textures.
+
+---
+
+## 2026-11-05 — explicit save model + master track pips (Claude Sonnet 4.6)
+
+### Dirty flag and explicit save
+
+`App` gains `bool edits_dirty = false`.  Editing operations (`commit_edits`,
+`undo_edit`, `redo_edit`, `delete_track`, `split_stereo_track`) now set
+`edits_dirty = true` instead of calling `save_session_edits()` immediately.
+`save_session_edits()` clears `edits_dirty` on success.  `close_session()` also
+clears it.
+
+A new `save_project()` helper writes `project.reca` and flushes
+`pending_wav_deletions` (deletes the WAV files).  This replaces the old inline
+Save button logic.
+
+**Window title** is updated each frame: `record-align — <folder> *` when dirty,
+without `*` when clean.
+
+**Ctrl+S** (inside the existing keyboard-shortcut block, after `ImGui::NewFrame`)
+calls `save_project()` for permanent sessions.
+
+**Save button** in the Edit toolbar now appears whenever `edits_dirty ||
+!pending_wav_deletions.empty()` (was: only when pending deletions existed) and
+calls `save_project()`.  The amber label beside it explains whether it's pending
+deletions, unsaved edits, or both.
+
+### Master track pips
+
+The tracking-pip drawing code previously skipped the master track (it checked
+`e.sync`, which is always null for the master).  Now, when drawing the master
+track lane, the code collects anchors from the first other track that has sync
+results and draws those `ref_seconds` positions as green / gray pips, giving the
+master the same visual feedback as every other track.
