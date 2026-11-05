@@ -122,10 +122,11 @@ Each track has a control panel on the left of the timeline. All changes are undo
 
 **Track name** — the WAV filename. Hover for the full path.
 
-**⋮ button** (or right-click the track name) — opens the track options menu:
+**... button** (or right-click anywhere on the track card) — opens the track options menu:
 - **Reset this track** — restores the track's gain, mute, offset, and drift to their last aligned values (or zero if not yet aligned).
 - **Make master** — promotes this track to master. Every other track aligns to it. Triggers a re-align automatically.
 - **Split to L / R** — decomposes a stereo WAV into two separate tracks, one for the left channel and one for the right. Each can then be controlled independently (gain, mute, solo). Exporting split tracks produces separate mono WAV files. Available only for stereo files whose waveform has finished loading. Clears the undo history.
+- **Delete track** — removes this track from the session. Clears the undo history. If the master track is deleted, the next track becomes master automatically.
 
 **Mute** — silence this track in playback and in the stereo mix. It still gets its own exported file.
 
@@ -133,15 +134,13 @@ Each track has a control panel on the left of the timeline. All changes are undo
 
 **Gain slider** — volume in decibels (−40 to +40 dB). 0 dB leaves the signal unchanged; +6 dB is roughly twice the level. Applied to both playback and export. Double-click to type a value. Right-click → **Reset gain to 0 dB**.
 
-**Master track** — the track shown in green. Its timing is never changed; all other tracks align to it. To change it, use **Make master** in the track menu.
+**Master track** — the track shown in green. Its timing is never changed; all other tracks align to it. To promote a different track, use **Make master** in the track menu.
 
 **ms (offset)** — time offset in milliseconds: how far into this track the master track's first moment falls. Positive means this microphone started recording first. Drag to nudge, double-click to type. Right-click to reset to the alignment result or to 0.
 
 **ppm (drift)** — clock drift in parts per million: how much faster this microphone's clock runs than the master. 100 ppm adds up to 360 ms of drift per hour. Drag to nudge, double-click to type. Right-click to reset.
 
 **Confidence indicator** — green/amber/red shows how reliable the alignment result is. Hover for a full explanation. Shown after Align tracks has run.
-
-**Make master** (inline button) — same as the menu item, for quick access.
 
 ---
 

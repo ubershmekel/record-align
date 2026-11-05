@@ -1319,6 +1319,26 @@ void draw_alignment_report(App& app) {
   }
 }
 
+void delete_track(App& app, size_t i) {
+  if (i >= app.tracks.size()) return;
+  if (app.edit.master == i) {
+    // Promote the next track (or previous if last) to master.
+    if (app.tracks.size() > 1)
+      app.edit.master = app.committed.master = (i + 1 < app.tracks.size()) ? i + 1 : i - 1;
+  } else if (app.edit.master > i) {
+    app.edit.master--;
+    app.committed.master--;
+  }
+  app.tracks.erase(app.tracks.begin() + i);
+  app.edit.tracks.erase(app.edit.tracks.begin() + i);
+  app.committed.tracks.erase(app.committed.tracks.begin() + i);
+  app.undo_stack.clear();
+  app.redo_stack.clear();
+  std::vector<PlaybackTrack*> ptrs;
+  for (auto& t : app.tracks) ptrs.push_back(&t->playback);
+  app.playback.set_tracks(ptrs);
+}
+
 void split_stereo_track(App& app, size_t i) {
   if (i >= app.tracks.size()) return;
   EditTrack& orig = *app.tracks[i];
@@ -1593,11 +1613,11 @@ void draw_edit_tab(App& app) {
                       ImGuiWindowFlags_NoScrollbar);
     const char* dname = t.display_name.empty() ? st.name.c_str() : t.display_name.c_str();
     ImGui::TextUnformatted(dname);
-    tip((st.wav_path.u8string() + "\n\nRight-click or click ⋮ for track options.").c_str());
+    tip((st.wav_path.u8string() + "\n\nRight-click or click ... for track options.").c_str());
     if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
       ImGui::OpenPopup("track_menu");
     ImGui::SameLine();
-    if (ImGui::SmallButton("\xe2\x8b\xae")) ImGui::OpenPopup("track_menu");  // U+22EE ⋮
+    if (ImGui::SmallButton("...")) ImGui::OpenPopup("track_menu");
     if (ImGui::BeginPopup("track_menu")) {
       if (ImGui::MenuItem("Reset this track")) {
         e.gain_db = 0.0f;
@@ -1613,6 +1633,8 @@ void draw_edit_tab(App& app) {
       if (st.wav->channels() >= 2 && t.channel_view < 0 && t.peaks_ready.load()) {
         if (ImGui::MenuItem("Split to L / R")) split_stereo_track(app, i);
       }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Delete track")) delete_track(app, i);
       ImGui::EndPopup();
     }
     bool solo = t.playback.solo.load();
@@ -1682,15 +1704,14 @@ void draw_edit_tab(App& app) {
         }
         ImGui::SameLine();
       }
-      ImGui::BeginDisabled(busy);
-      if (ImGui::SmallButton("Make master")) set_master(app, i);
-      tip("Line every other track up with this one instead. This aligns the tracks again.");
-      ImGui::EndDisabled();
     }
     if (t.channel_view != 1 && (st.gap_frames > 0 || st.dropped_frames > 0)) {
       ImGui::TextColored(kAmber, "%.2f s of silence was inserted",
                          double(st.gap_frames + st.dropped_frames) / st.wav->sample_rate());
     }
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+        !ImGui::IsAnyItemHovered())
+      ImGui::OpenPopup("track_menu");
     ImGui::EndChild();
 
     const ImVec2 canvas_pos(canvas_x, lane_pos.y);
