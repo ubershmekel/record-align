@@ -828,7 +828,10 @@ void draw_settings_tab(App& app) {
   ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.72f, 1.0f, 1.0f));
   ImGui::TextUnformatted(kGithubUrl);
   ImGui::PopStyleColor();
-  if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Click to open in your browser");
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+    ImGui::SetTooltip("Click to open in your browser");
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  }
   if (ImGui::IsItemClicked()) SDL_OpenURL(kGithubUrl);
 }
 
@@ -862,6 +865,7 @@ void draw_clap_guide(App& app, bool recording) {
     }
   } else {
     ImGui::TextUnformatted("Clap 3 times at the start of each recording, and 3 times at the end.");
+    ImGui::Spacing();
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextColored(kMuted,
                        "Every microphone runs on its own clock, so they start at slightly different moments and can "
@@ -1070,11 +1074,7 @@ void draw_record_tab(App& app) {
 
   if (!recording && !app.last_session.empty()) {
     ImGui::Spacing();
-    ImGui::TextUnformatted(("Saved to " + app.last_session.u8string()).c_str());
-    if (ImGui::Button("Open in editor")) {
-      load_session_into_editor(app, app.last_session);
-      app.tab_request = 2;
-    }
+    ImGui::TextColored(kMuted, "%s", ("Saved to " + app.last_session.u8string()).c_str());
   }
 }
 
@@ -1218,7 +1218,7 @@ void draw_alignment_report(App& app) {
       kEditsFileName);
   ImGui::Spacing();
 
-  static const char* const kHeaders[] = {"Track", "Confidence", "Offset", "Drift", "Drift over recording", "Matches", "Spread", "Timestamps said"};
+  static const char* const kHeaders[] = {"Track", "Confidence", "Offset", "Drift", "Total drift (ms)", "Matches", "Spread", "Device estimate"};
   static const char* const kHeaderTips[] = {
       "Each track is compared with the master track.",
       "How much to trust this result. Hover over a track's label for the explanation.",
@@ -1432,7 +1432,8 @@ void draw_edit_tab(App& app) {
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(app.session.dir.u8string().c_str());
+    ImGui::TextColored(kMuted, "%s", app.session.dir.filename().u8string().c_str());
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", app.session.dir.u8string().c_str());
   }
   if (!app.edit_error.empty()) ImGui::TextColored(kRed, "%s", app.edit_error.c_str());
   if (app.tracks.empty()) {
@@ -1459,13 +1460,15 @@ void draw_edit_tab(App& app) {
   tip("Play or pause all tracks together (Space).");
   ImGui::EndDisabled();
   ImGui::SameLine();
-  if (ImGui::Button("Back to start")) app.playback.seek(effective_in(app));
+  if (ImGui::Button("\xe2\x8f\xaa")) app.playback.seek(effective_in(app));
   tip("Move the playhead to the start, or to the in point if one is set.");
   ImGui::SameLine();
   ImGui::AlignTextToFramePadding();
   ImGui::Text("%s", format_time_precise(app.playback.position()).c_str());
   tip("Playhead position, in minutes and seconds. It can be slightly negative when a track started before the master track.");
-  ImGui::SameLine(0.0f, 24.0f * scale);
+  ImGui::SameLine(0.0f, 14.0f * scale);
+  ImGui::TextColored(kMuted, "|");
+  ImGui::SameLine(0.0f, 14.0f * scale);
   if (ImGui::Button("Set in")) {
     app.edit.in_set = true;
     app.edit.in_point = std::min(app.playback.position(), effective_out(app));
@@ -1501,7 +1504,9 @@ void draw_edit_tab(App& app) {
   } else {
     ImGui::TextColored(kMuted, "No trim");
   }
-  ImGui::SameLine(0.0f, 24.0f * scale);
+  ImGui::SameLine(0.0f, 14.0f * scale);
+  ImGui::TextColored(kMuted, "|");
+  ImGui::SameLine(0.0f, 14.0f * scale);
   if (ImGui::Button("Zoom in")) {
     double center = app.view_start + app.view_seconds * 0.5;
     app.view_seconds = std::max(0.05, app.view_seconds * 0.5);
@@ -1533,7 +1538,9 @@ void draw_edit_tab(App& app) {
   ImGui::SameLine();
   ImGui::Checkbox("Hear aligned", &app.aligned);
   tip("Turn this off to see and hear the tracks as they were recorded, for comparison.");
-  ImGui::SameLine(0.0f, 24.0f * scale);
+  ImGui::SameLine(0.0f, 14.0f * scale);
+  ImGui::TextColored(kMuted, "|");
+  ImGui::SameLine(0.0f, 14.0f * scale);
   bool peaks_ready = true;
   for (const auto& t : app.tracks) peaks_ready = peaks_ready && t->peaks_ready.load();
   ImGui::BeginDisabled(busy || !peaks_ready);
@@ -1541,17 +1548,22 @@ void draw_edit_tab(App& app) {
   tip("Sets each track's gain so its loudest moment reaches -1 dB. Claps are often the loudest thing, so to bring up "
       "speech, set the in and out points past the claps first. Your WAV files are not changed.");
   ImGui::EndDisabled();
-  ImGui::SameLine(0.0f, 24.0f * scale);
+  ImGui::SameLine(0.0f, 14.0f * scale);
+  ImGui::TextColored(kMuted, "|");
+  ImGui::SameLine(0.0f, 14.0f * scale);
   ImGui::BeginDisabled(busy);
   if (ImGui::Button("Export aligned WAVs")) start_export_job(app);
   tip("Writes one new WAV per track into an \"aligned\" folder in the session, all the same length and starting at the "
       "same moment. Drop them in any editor at time zero and they line up. Includes your gain and trim.");
   ImGui::EndDisabled();
+  ImGui::SameLine(0.0f, 8.0f * scale);
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextColored(kMuted, "with:");
   ImGui::SameLine();
-  ImGui::Checkbox("Stereo mix", &app.write_mix);
+  ImGui::Checkbox("stereo mix", &app.write_mix);
   tip("Also writes mix.wav, combining the tracks you can currently hear. It's scaled down if it would otherwise clip.");
   ImGui::SameLine();
-  ImGui::Checkbox("Match master's length", &app.match_master);
+  ImGui::Checkbox("match master's length", &app.match_master);
   tip("Makes every exported file start and end exactly with the master track, cutting anything outside it. Use this "
       "to lay audio under a video: put the video and the files at time zero. In and out points take priority.");
   if (busy) {
@@ -1639,12 +1651,12 @@ void draw_edit_tab(App& app) {
     }
     bool solo = t.playback.solo.load();
     ImGui::PushStyleColor(ImGuiCol_Button, e.mute ? ImVec4(0.72f, 0.42f, 0.14f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
-    if (ImGui::SmallButton("Mute")) e.mute = !e.mute;
+    if (ImGui::Button("Mute")) e.mute = !e.mute;
     ImGui::PopStyleColor();
     tip("Silence this track. It's also left out of the stereo mix, but still gets its own exported file.");
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, solo ? ImVec4(0.20f, 0.55f, 0.30f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Button));
-    if (ImGui::SmallButton("Solo")) click_solo(app, i);
+    if (ImGui::Button("Solo")) click_solo(app, i);
     ImGui::PopStyleColor();
     tip("Hear only this track. Click again to hear everything. Shift-click or Ctrl-click to add another track.");
     ImGui::SameLine();
@@ -1702,7 +1714,6 @@ void draw_edit_tab(App& app) {
                              e.sync->anchors_used, e.sync->anchors_usable);
           ImGui::EndTooltip();
         }
-        ImGui::SameLine();
       }
     }
     if (t.channel_view != 1 && (st.gap_frames > 0 || st.dropped_frames > 0)) {
