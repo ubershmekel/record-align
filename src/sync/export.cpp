@@ -41,13 +41,22 @@ bool write_scaled(WavWriter* wav, const float* samples, uint64_t frames, int cha
   return wav->write(scratch->data(), frames);
 }
 
+bool write_channel_scaled(WavWriter* wav, const float* samples, uint64_t frames, int in_ch, int ch_idx, float gain,
+                          std::vector<float>* scratch) {
+  if (scratch->size() < frames) scratch->resize(frames);
+  for (uint64_t i = 0; i < frames; i++) (*scratch)[i] = samples[i * in_ch + ch_idx] * gain;
+  return wav->write(scratch->data(), frames);
+}
+
 // Writes the track for one output range. progress_update receives 0 to 1.
 template <typename ProgressFn>
 bool render_track(const ExportTrack& t, const fs::path& path, int rate, double start, uint64_t total_frames,
                   ProgressFn progress_update, std::string* err) {
   WavWriter wav;
   const int ch = t.audio.channels;
-  if (!wav.open(path, rate, ch, err)) return false;
+  const int cv = (t.channel_view >= 0 && ch >= 2) ? t.channel_view : -1;
+  const int out_ch = cv >= 0 ? 1 : ch;
+  if (!wav.open(path, rate, out_ch, err)) return false;
   auto fail = [&]() {
     if (err) *err = wav.error();
     return false;
@@ -58,7 +67,7 @@ bool render_track(const ExportTrack& t, const fs::path& path, int rate, double s
   // Output frames before this track's first sample are silence.
   const double lead = (track_start(t) - start) * rate;
   const uint64_t lead_frames = lead > 0.0 ? std::min(total_frames, uint64_t(std::ceil(lead))) : 0;
-  if (!write_silence(&wav, ch, lead_frames, &scratch)) return fail();
+  if (!write_silence(&wav, out_ch, lead_frames, &scratch)) return fail();
   uint64_t written = lead_frames;
 
   const double first_seconds =
@@ -69,7 +78,11 @@ bool render_track(const ExportTrack& t, const fs::path& path, int rate, double s
   if (t.map.drift == 0.0 && t.audio.sample_rate == rate) {
     while (written < total_frames && read_pos < t.audio.frames) {
       uint64_t n = std::min({kChunkFrames, total_frames - written, t.audio.frames - read_pos});
-      if (!write_scaled(&wav, t.audio.samples + read_pos * ch, n, ch, t.gain, &gain_scratch)) return fail();
+      if (cv >= 0) {
+        if (!write_channel_scaled(&wav, t.audio.samples + read_pos * ch, n, ch, cv, t.gain, &gain_scratch)) return fail();
+      } else {
+        if (!write_scaled(&wav, t.audio.samples + read_pos * ch, n, ch, t.gain, &gain_scratch)) return fail();
+      }
       read_pos += n;
       written += n;
       progress_update(double(written) / total_frames);
@@ -100,9 +113,10 @@ bool render_track(const ExportTrack& t, const fs::path& path, int rate, double s
       }
       read_pos += uint64_t(d.input_frames_used);
       if (d.output_frames_gen > 0) {
-        if (!write_scaled(&wav, scratch.data(), uint64_t(d.output_frames_gen), ch, t.gain, &gain_scratch)) {
-          return fail();
-        }
+        bool ok = cv >= 0
+            ? write_channel_scaled(&wav, scratch.data(), uint64_t(d.output_frames_gen), ch, cv, t.gain, &gain_scratch)
+            : write_scaled(&wav, scratch.data(), uint64_t(d.output_frames_gen), ch, t.gain, &gain_scratch);
+        if (!ok) return fail();
         written += uint64_t(d.output_frames_gen);
         progress_update(double(written) / total_frames);
       } else if (d.end_of_input) {
@@ -113,7 +127,7 @@ bool render_track(const ExportTrack& t, const fs::path& path, int rate, double s
     (void)input_done;
   }
 
-  if (written < total_frames && !write_silence(&wav, ch, total_frames - written, &scratch)) return fail();
+  if (written < total_frames && !write_silence(&wav, out_ch, total_frames - written, &scratch)) return fail();
   if (!wav.close()) return fail();
   return true;
 }

@@ -147,6 +147,9 @@ struct EditTrack {
   PlaybackTrack playback;
   TrackPeaks peaks;
   std::atomic<bool> peaks_ready{false};
+  int channel_view = -1;      // -1=all channels, 0=L-only, 1=R-only
+  std::string display_name;   // overrides session track name when non-empty
+  size_t session_index = 0;   // index into app.session.tracks
 };
 
 // What the user can undo. Solo and the playhead are left out: they are for
@@ -283,6 +286,7 @@ void sync_playback(App& app) {
     p.drift.store(app.aligned ? double(e.drift_ppm) * 1e-6 : 0.0);
     p.gain.store(std::pow(10.0f, e.gain_db / 20.0f));
     p.mute.store(e.mute);
+    p.channel_view.store(app.tracks[i]->channel_view);
   }
   update_timeline(app);
 }
@@ -332,7 +336,7 @@ void close_session(App& app) {
 
 void save_session_edits(App& app) {
   SessionEdits saved;
-  saved.master_name = app.session.tracks[app.edit.master].name;
+  saved.master_name = app.session.tracks[app.tracks[app.edit.master]->session_index].name;
   saved.in_set = app.edit.in_set;
   saved.out_set = app.edit.out_set;
   saved.in_seconds = app.edit.in_point;
@@ -340,7 +344,9 @@ void save_session_edits(App& app) {
   for (size_t i = 0; i < app.edit.tracks.size(); i++) {
     const TrackEditState& e = app.edit.tracks[i];
     TrackEdit t;
-    t.name = app.session.tracks[i].name;
+    t.name = app.tracks[i]->display_name.empty()
+        ? app.session.tracks[app.tracks[i]->session_index].name
+        : app.tracks[i]->display_name;
     t.offset_ms = e.offset_ms;
     t.drift_ppm = e.drift_ppm;
     t.gain_db = e.gain_db;
@@ -445,9 +451,10 @@ void load_session_into_editor(App& app, const fs::path& dir) {
     app.session = Session();
     return;
   }
-  for (auto& st : app.session.tracks) {
+  for (size_t j = 0; j < app.session.tracks.size(); j++) {
     auto t = std::make_unique<EditTrack>();
-    t->playback.wav = st.wav.get();
+    t->playback.wav = app.session.tracks[j].wav.get();
+    t->session_index = j;
     app.tracks.push_back(std::move(t));
   }
   app.edit.tracks.resize(app.tracks.size());
@@ -476,20 +483,20 @@ void load_session_into_editor(App& app, const fs::path& dir) {
 }
 
 void start_sync_job(App& app) {
-  if (app.job_running.load() || app.tracks.size() < 2) return;
+  if (app.job_running.load() || app.session.tracks.size() < 2) return;
   finish_job(app);
   app.job_running.store(true);
   app.job_progress.store(0.0f);
   app.job_label = "Aligning tracks";
   app.job_message.clear();
   app.job_failed = false;
-  const size_t master = app.edit.master;
-  app.job_thread = std::thread([&app, master] {
-    const SessionTrack& ref = app.session.tracks[master];
+  const size_t master_si = app.tracks[app.edit.master]->session_index;
+  app.job_thread = std::thread([&app, master_si] {
+    const SessionTrack& ref = app.session.tracks[master_si];
     const ClockFit ref_clock = fit_clock(ref.timing, ref.wav->sample_rate());
     std::vector<std::pair<size_t, SyncResult>> results;
     for (size_t i = 0; i < app.session.tracks.size(); i++) {
-      if (i == master) continue;
+      if (i == master_si) continue;
       const SessionTrack& t = app.session.tracks[i];
       TimeMap prior;
       const bool has_prior = time_map_from_clocks(ref_clock, fit_clock(t.timing, t.wav->sample_rate()), &prior);
@@ -519,11 +526,15 @@ void collect_sync_results(App& app) {
   std::lock_guard<std::mutex> lock(app.job_mutex);
   if (!app.job_sync_done) return;
   app.job_sync_done = false;
-  for (auto& [index, result] : app.job_sync_results) {
-    TrackEditState& e = app.edit.tracks[index];
-    e.offset_ms = float(result.map.offset_seconds * 1000.0);
-    e.drift_ppm = float(result.map.drift * 1e6);
-    e.sync = std::make_shared<const SyncResult>(std::move(result));
+  for (auto& [sess_idx, result] : app.job_sync_results) {
+    auto shared = std::make_shared<const SyncResult>(std::move(result));
+    for (size_t di = 0; di < app.tracks.size(); di++) {
+      if (app.tracks[di]->session_index != sess_idx) continue;
+      TrackEditState& e = app.edit.tracks[di];
+      e.offset_ms = float(shared->map.offset_seconds * 1000.0);
+      e.drift_ppm = float(shared->map.drift * 1e6);
+      e.sync = shared;
+    }
   }
   app.job_sync_results.clear();
   app.aligned = true;
@@ -546,7 +557,10 @@ void start_export_job(App& app) {
     e.audio = view_of(*t.playback.wav);
     e.map.offset_seconds = double(state.offset_ms) / 1000.0;
     e.map.drift = double(state.drift_ppm) * 1e-6;
-    e.name = app.session.tracks[i].name;
+    e.name = app.tracks[i]->display_name.empty()
+        ? app.session.tracks[app.tracks[i]->session_index].name
+        : app.tracks[i]->display_name;
+    e.channel_view = app.tracks[i]->channel_view;
     e.gain = std::pow(10.0f, state.gain_db / 20.0f);
     e.in_mix = !state.mute && (!any_solo || t.playback.solo.load());
     jobs.push_back(std::move(e));
@@ -654,7 +668,12 @@ void normalize_all(App& app) {
     const size_t b0 = size_t(first / kPeakBucketFrames);
     const size_t b1 = std::min(t.peaks.minimum.size(), size_t(last / kPeakBucketFrames) + 1);
     float peak = 0.0f;
-    for (size_t b = b0; b < b1; b++) peak = std::max({peak, -t.peaks.minimum[b], t.peaks.maximum[b]});
+    if (t.channel_view >= 0 && int(t.peaks.ch_minimum.size()) > t.channel_view) {
+      const int cv = t.channel_view;
+      for (size_t b = b0; b < b1; b++) peak = std::max({peak, -t.peaks.ch_minimum[cv][b], t.peaks.ch_maximum[cv][b]});
+    } else {
+      for (size_t b = b0; b < b1; b++) peak = std::max({peak, -t.peaks.minimum[b], t.peaks.maximum[b]});
+    }
 
     char part[64];
     if (peak < kSilence) {
@@ -1136,7 +1155,12 @@ void draw_waveform(const EditTrack& t, float gain_db, const ImVec2& p, const ImV
   const float gain_scale = std::max(0.1f, 1.0f + gain_db / 20.0f);
   const ImU32 color_l = muted ? IM_COL32(95, 100, 110, 255) : IM_COL32(95, 170, 225, 255);
   const int ch = wav.channels();
-  if (ch >= 2 && int(t.peaks.ch_minimum.size()) >= 2) {
+  if (t.channel_view >= 0 && ch >= 2 && int(t.peaks.ch_minimum.size()) > t.channel_view) {
+    draw_channel_waveform(wav, t.peaks.ch_minimum[t.channel_view], t.peaks.ch_maximum[t.channel_view],
+                          t.peaks.ch_coarse_minimum[t.channel_view], t.peaks.ch_coarse_maximum[t.channel_view],
+                          t.channel_view, offset, drift, p, size,
+                          view_start, view_seconds, draw, color_l, gain_scale);
+  } else if (ch >= 2 && int(t.peaks.ch_minimum.size()) >= 2) {
     const float half_h = std::floor(size.y * 0.5f);
     const float divider_y = p.y + half_h;
     draw->AddLine(ImVec2(p.x, divider_y), ImVec2(p.x + size.x, divider_y), IM_COL32(50, 55, 65, 180));
@@ -1219,10 +1243,12 @@ void draw_alignment_report(App& app) {
     for (size_t i = 0; i < app.edit.tracks.size(); i++) {
       const std::shared_ptr<const SyncResult>& s = app.edit.tracks[i].sync;
       if (!s) continue;
-      const double seconds = app.session.tracks[i].wav->seconds();
+      const double seconds = app.session.tracks[app.tracks[i]->session_index].wav->seconds();
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
-      ImGui::TextUnformatted(app.session.tracks[i].name.c_str());
+      ImGui::TextUnformatted(app.tracks[i]->display_name.empty()
+          ? app.session.tracks[app.tracks[i]->session_index].name.c_str()
+          : app.tracks[i]->display_name.c_str());
       ImGui::TableNextColumn();
       ImGui::TextColored(confidence_color(s->confidence), "%s", confidence_label(s->confidence));
       ImGui::TableNextColumn();
@@ -1252,7 +1278,10 @@ void draw_alignment_report(App& app) {
     ImGui::PushID(int(i));
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Text, confidence_color(s->confidence));
-    ImGui::TextWrapped("%s: %s", app.session.tracks[i].name.c_str(), s->message.c_str());
+    const char* tname = app.tracks[i]->display_name.empty()
+        ? app.session.tracks[app.tracks[i]->session_index].name.c_str()
+        : app.tracks[i]->display_name.c_str();
+    ImGui::TextWrapped("%s: %s", tname, s->message.c_str());
     ImGui::PopStyleColor();
     if (ImGui::TreeNode("Every sound that was compared")) {
       std::vector<SyncAnchor> anchors = s->anchors;
@@ -1288,6 +1317,47 @@ void draw_alignment_report(App& app) {
     }
     ImGui::PopID();
   }
+}
+
+void split_stereo_track(App& app, size_t i) {
+  if (i >= app.tracks.size()) return;
+  EditTrack& orig = *app.tracks[i];
+  const SessionTrack& st = app.session.tracks[orig.session_index];
+  if (st.wav->channels() < 2 || !orig.peaks_ready.load()) return;
+
+  orig.channel_view = 0;
+  orig.playback.channel_view.store(0);
+  orig.display_name = st.name + " (L)";
+
+  auto r = std::make_unique<EditTrack>();
+  r->playback.wav = orig.playback.wav;
+  r->playback.channel_view.store(1);
+  r->playback.gain.store(orig.playback.gain.load());
+  r->playback.mute.store(orig.playback.mute.load());
+  r->playback.solo.store(false);
+  r->playback.offset_seconds.store(orig.playback.offset_seconds.load());
+  r->playback.drift.store(orig.playback.drift.load());
+  r->channel_view = 1;
+  r->display_name = st.name + " (R)";
+  r->session_index = orig.session_index;
+  r->peaks = orig.peaks;
+  r->peaks_ready.store(true);
+
+  app.tracks.insert(app.tracks.begin() + i + 1, std::move(r));
+
+  TrackEditState r_state = app.edit.tracks[i];
+  app.edit.tracks.insert(app.edit.tracks.begin() + i + 1, r_state);
+  app.committed.tracks.insert(app.committed.tracks.begin() + i + 1, r_state);
+
+  if (app.edit.master > i) { app.edit.master++; app.committed.master++; }
+
+  app.undo_stack.clear();
+  app.redo_stack.clear();
+
+  sync_playback(app);
+  std::vector<PlaybackTrack*> ptrs;
+  for (auto& t : app.tracks) ptrs.push_back(&t->playback);
+  app.playback.set_tracks(ptrs);
 }
 
 void draw_edit_tab(App& app) {
@@ -1515,21 +1585,33 @@ void draw_edit_tab(App& app) {
   for (size_t i = 0; i < app.tracks.size(); i++) {
     EditTrack& t = *app.tracks[i];
     TrackEditState& e = app.edit.tracks[i];
-    const SessionTrack& st = app.session.tracks[i];
+    const SessionTrack& st = app.session.tracks[t.session_index];
     ImGui::PushID(int(i));
     const ImVec2 lane_pos = ImGui::GetCursorScreenPos();
 
     ImGui::BeginChild("controls", ImVec2(panel_width, lane_height), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_NoScrollbar);
-    ImGui::TextUnformatted(st.name.c_str());
-    tip((st.wav_path.u8string() + "\n\nRight-click to reset this track.").c_str());
-    if (ImGui::BeginPopupContextItem("track_menu")) {
+    const char* dname = t.display_name.empty() ? st.name.c_str() : t.display_name.c_str();
+    ImGui::TextUnformatted(dname);
+    tip((st.wav_path.u8string() + "\n\nRight-click or click ⋮ for track options.").c_str());
+    if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+      ImGui::OpenPopup("track_menu");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("\xe2\x8b\xae")) ImGui::OpenPopup("track_menu");  // U+22EE ⋮
+    if (ImGui::BeginPopup("track_menu")) {
       if (ImGui::MenuItem("Reset this track")) {
         e.gain_db = 0.0f;
         e.mute = false;
         e.offset_ms = e.sync ? float(e.sync->map.offset_seconds * 1000.0) : 0.0f;
         e.drift_ppm = e.sync ? float(e.sync->map.drift * 1e6) : 0.0f;
         t.playback.solo.store(false);
+      }
+      if (i != app.edit.master && !busy) {
+        if (ImGui::MenuItem("Make master")) set_master(app, i);
+        tip("Line every other track up with this one instead. This aligns the tracks again.");
+      }
+      if (st.wav->channels() >= 2 && t.channel_view < 0 && t.peaks_ready.load()) {
+        if (ImGui::MenuItem("Split to L / R")) split_stereo_track(app, i);
       }
       ImGui::EndPopup();
     }
@@ -1605,7 +1687,7 @@ void draw_edit_tab(App& app) {
       tip("Line every other track up with this one instead. This aligns the tracks again.");
       ImGui::EndDisabled();
     }
-    if (st.gap_frames > 0 || st.dropped_frames > 0) {
+    if (t.channel_view != 1 && (st.gap_frames > 0 || st.dropped_frames > 0)) {
       ImGui::TextColored(kAmber, "%.2f s of silence was inserted",
                          double(st.gap_frames + st.dropped_frames) / st.wav->sample_rate());
     }

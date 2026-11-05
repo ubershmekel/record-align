@@ -88,9 +88,16 @@ void Playback::mix(float* stereo, int offset, int frames, double start) const {
       const float* a = samples + index * ch;
       const float* b = a + ch;
       const int right = ch > 1 ? 1 : 0;
+      const int cv = t->channel_view.load();
       float* out = stereo + (offset + i) * 2;
-      out[0] += gain * (a[0] + (b[0] - a[0]) * fraction);
-      out[1] += gain * (a[right] + (b[right] - a[right]) * fraction);
+      if (cv >= 0 && ch >= 2) {
+        const int c = cv < ch ? cv : 0;
+        const float v = gain * (a[c] + (b[c] - a[c]) * fraction);
+        if (cv == 0) out[0] += v; else out[1] += v;
+      } else {
+        out[0] += gain * (a[0] + (b[0] - a[0]) * fraction);
+        out[1] += gain * (a[right] + (b[right] - a[right]) * fraction);
+      }
     }
   }
 }

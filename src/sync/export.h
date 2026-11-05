@@ -13,6 +13,7 @@ struct ExportTrack {
   std::string name;     // File name without extension.
   float gain = 1.0f;
   bool in_mix = true;
+  int channel_view = -1;  // -1=all, 0=L, 1=R; produces mono WAV when set
 };
 
 struct ExportOptions {

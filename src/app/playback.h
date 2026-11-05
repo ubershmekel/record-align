@@ -17,6 +17,7 @@ struct PlaybackTrack {
   std::atomic<bool> solo{false};
   std::atomic<double> offset_seconds{0.0};
   std::atomic<double> drift{0.0};
+  std::atomic<int> channel_view{-1};  // -1=all, 0=L-only, 1=R-only for split stereo
 };
 
 // Mixes tracks to stereo for listening. This is a preview: it uses simple
