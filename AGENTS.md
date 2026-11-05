@@ -120,3 +120,34 @@ alignment marker.  Intended for use as a window icon and in marketing materials.
 
 - Stopping a recording now loads the finished session and selects the Edit tab.
   Recorded sessions are marked as saved because their audio is already on disk.
+
+---
+
+## 2026-11-04 — UX pass (Claude Sonnet 4.6)
+
+Layout, labeling, spacing, and visual polish in `src/app/main.cpp`. No feature
+or logic changes.
+
+- **Mute / Solo** promoted from `SmallButton` to `Button` so they align in
+  height with the adjacent gain slider.
+- **Orphaned `SameLine`** after confidence text removed (the Make master
+  `SmallButton` had been removed in an earlier commit).
+- **Muted `|` separators** added between toolbar groups: transport | trim | zoom
+  on the playback row; align | normalize | export on the sync row.
+- **Export checkboxes** relabeled with a `with:` prefix so they read as options
+  for the Export button.
+- **Session folder name** shown in the Edit toolbar instead of the full path;
+  full path appears on hover as a tooltip.
+- **GitHub link** (Settings tab) shows a hand cursor on hover.
+- **"Open in editor"** button removed from Record tab; stop recording already
+  auto-switches to Edit.
+- **Clap guide** gets a `Spacing()` between the instruction and the explanation.
+- **Alignment table headers** renamed: "Drift over recording" → "Total drift (ms)",
+  "Timestamps said" → "Device estimate".
+- **Back-to-start button** uses `"<<"` (ASCII). The attempted ⏪ glyph (U+23EA,
+  Miscellaneous Technical block) rendered as a broken box because Segoe UI and
+  Arial — the system fonts loaded on Windows and macOS — do not cover that block.
+  The ⋮ glyph (U+22EE, Mathematical Operators) works and can be used safely.
+  To use real icon glyphs, embed a subset of Font Awesome or Material Icons as a
+  second TTF in the ImGui font atlas; do not use `ImGui::ImageButton` with
+  PNG/SVG textures.

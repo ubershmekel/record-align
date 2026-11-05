@@ -1460,7 +1460,7 @@ void draw_edit_tab(App& app) {
   tip("Play or pause all tracks together (Space).");
   ImGui::EndDisabled();
   ImGui::SameLine();
-  if (ImGui::Button("\xe2\x8f\xaa")) app.playback.seek(effective_in(app));
+  if (ImGui::Button("<<")) app.playback.seek(effective_in(app));
   tip("Move the playhead to the start, or to the in point if one is set.");
   ImGui::SameLine();
   ImGui::AlignTextToFramePadding();
